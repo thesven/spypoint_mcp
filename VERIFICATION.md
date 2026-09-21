@@ -17,7 +17,7 @@ SPYPOINT compatibility, cloud deployment, or universal superiority.
 | Persistence | Restarts, cancellation, checkpoint conflict rollback, overlapping pages, duplicate/corrupt downloads, interrupted file-record recovery, timestamp stalls tested. |
 | Visual QA | Synthetic 2×2 contact sheet rendered and visually inspected; readable numbered timestamps and a visible failed tile. EXIF orientation, decode limits and resize dimensions tested. |
 | Built wheel/sdist | Built both archives; membership inspection passed. Fresh wheel installation passed stdio initialize and discovery of all 19 tools. |
-| Linux CI | Workflow authored with pinned action commits and a Python 3.11–3.14 matrix; not executed in hosted CI. |
+| Linux CI | Passed on Python 3.11, 3.12, 3.13 and 3.14: lint, format, tests/coverage, build, package inspection and installed-wheel stdio smoke test. [Run evidence](https://github.com/thesven/spypoint_mcp/actions/runs/35619578036). |
 
 Tests deliberately use synthetic responses and image/video fixtures. The MP4 fixture
 checks transport/signature behavior, not real-world video decoding. No private photos
@@ -73,3 +73,14 @@ suffix while matching the burned-in local camera clock. Automatic timezone conve
 can therefore shift local activity hours incorrectly. The current timezone configuration
 does not override explicit offsets. This is a known unresolved compatibility limitation;
 inspect image stamps before using affected time-of-day summaries for planning.
+
+## Initial GitHub publication audit
+
+Source was published to [thesven/spypoint_mcp](https://github.com/thesven/spypoint_mcp)
+after scanning staged content and the initial commit history with Gitleaks 8.30.1
+(no findings). An additional exact-value scan checked test credentials and account/photo
+identifiers without printing them; none appeared in the 40 tracked project files.
+Private images, SQLite catalogs, working analysis files, virtual environments, build
+artifacts and credential files are outside the committed tree or ignored. The only
+environment file tracked is the empty-credential `.env.example`. These checks describe
+the audited publication, not a guarantee about future commits.

@@ -54,7 +54,7 @@ camera result. Review warnings and errors before relying on fleet coverage. Once
 ask your client to list cameras and show the latest image from each one.
 
 The examples use a POSIX shell (macOS/Linux). Automated local checks cover macOS ARM64
-with Python 3.11, 3.12, and 3.14. Linux CI is configured but has not run in hosted CI;
+with Python 3.11, 3.12, and 3.14. Hosted Linux CI passes on Python 3.11–3.14;
 Windows has not been validated. See [verification evidence](VERIFICATION.md).
 
 `configure` asks for your username and a hidden password. It creates a plaintext `.env`
