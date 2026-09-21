@@ -1,0 +1,75 @@
+{
+  "kind": "live_account",
+  "checks": {
+    "list_cameras": {
+      "ok": true
+    },
+    "get_camera": {
+      "ok": true
+    },
+    "camera_health": {
+      "ok": true
+    },
+    "list_photo_tags": {
+      "ok": true
+    },
+    "list_photos": {
+      "ok": true
+    },
+    "get_photo": {
+      "ok": true
+    },
+    "latest_photos": {
+      "ok": true
+    },
+    "view_photo": {
+      "ok": true
+    },
+    "create_contact_sheet": {
+      "ok": true
+    },
+    "download_photo": {
+      "ok": true,
+      "previous_run_hash_verified": true
+    },
+    "search_catalog": {
+      "ok": true
+    },
+    "catalog_status": {
+      "ok": true
+    },
+    "summarize_activity": {
+      "ok": true
+    },
+    "export_catalog": {
+      "ok": true
+    },
+    "start_photo_sync": {
+      "ok": true
+    },
+    "get_sync_status": {
+      "ok": true
+    },
+    "list_sync_jobs": {
+      "ok": true
+    },
+    "continue_photo_sync": {
+      "ok": true
+    }
+  },
+  "limitations": [
+    "Account has one owned camera and no shared cameras; no live shared-camera test.",
+    "No existing video tested.",
+    "Desktop client rendering and UI count comparison remain unverified."
+  ],
+  "cameras": 1,
+  "shared_cameras": 0,
+  "discovery_complete": true,
+  "sample_photos": 6,
+  "favorite_sample_count": 0,
+  "sync_first_status": "pending",
+  "sync_final_status": "finished",
+  "sync_indexed": 1,
+  "contact_sheet_large_rendition_verified": true,
+  "existing_hdvideo_sample_count": 0
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spypoint": {
+      "command": "/absolute/path/to/spypoint-mcp/.venv/bin/python",
+      "args": ["-m", "spypoint_mcp", "serve", "--env-file", "/absolute/path/to/spypoint-mcp/.env"]
+    }
+  }
+}

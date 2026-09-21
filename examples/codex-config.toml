@@ -1,0 +1,5 @@
+[mcp_servers.spypoint]
+command = "/absolute/path/to/spypoint-mcp/.venv/bin/python"
+args = ["-m", "spypoint_mcp", "serve", "--env-file", "/absolute/path/to/spypoint-mcp/.env"]
+startup_timeout_sec = 20
+tool_timeout_sec = 300
