@@ -34,7 +34,14 @@ PHOTO_FIELDS = {
 }
 
 
-def selection(camera_ids, after, before, tags, favorites_only):
+def selection(
+    camera_ids,
+    after,
+    before,
+    tags,
+    favorites_only,
+    has_video: bool | None = None,
+):
     clauses, params = [], []
     if camera_ids is not None:
         if not camera_ids:
@@ -50,6 +57,12 @@ def selection(camera_ids, after, before, tags, favorites_only):
             params.append(value)
     if favorites_only:
         clauses.append("json_extract(metadata, '$.favorite') = 1")
+    if has_video is True:
+        clauses.append("json_array_length(photos.metadata, '$.available_video_sizes') > 0")
+    elif has_video is False:
+        clauses.append(
+            "COALESCE(json_array_length(photos.metadata, '$.available_video_sizes'), 0) = 0"
+        )
     for tag in set(tags or []):
         clauses.append("EXISTS (SELECT 1 FROM json_each(photos.metadata, '$.tags') WHERE value=?)")
         params.append(tag)
@@ -82,31 +95,36 @@ class Catalog:
         db.row_factory = sqlite3.Row
         try:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise SpypointError(
                     "Catalog was created by a newer server; upgrade before opening it."
                 )
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS photos (
-                    id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, date TEXT NOT NULL,
-                    metadata TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS photos_camera_date ON photos(camera_id, date, id);
-                CREATE INDEX IF NOT EXISTS photos_date ON photos(date, id);
-                CREATE TABLE IF NOT EXISTS downloads (
-                    photo_id TEXT NOT NULL, size TEXT NOT NULL, record TEXT NOT NULL,
-                    PRIMARY KEY(photo_id, size)
-                );
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS job_photos (
-                    job_id TEXT NOT NULL, photo_id TEXT NOT NULL,
-                    PRIMARY KEY(job_id, photo_id)
-                );
-                PRAGMA user_version=1;
-            """)
+            if version < 2:
+                db.executescript("""
+                    CREATE TABLE IF NOT EXISTS photos (
+                        id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, date TEXT NOT NULL,
+                        metadata TEXT NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS photos_camera_date ON photos(camera_id, date, id);
+                    CREATE INDEX IF NOT EXISTS photos_date ON photos(date, id);
+                    CREATE TABLE IF NOT EXISTS downloads (
+                        photo_id TEXT NOT NULL, size TEXT NOT NULL, record TEXT NOT NULL,
+                        PRIMARY KEY(photo_id, size)
+                    );
+                    CREATE TABLE IF NOT EXISTS jobs (
+                        id TEXT PRIMARY KEY, state TEXT NOT NULL,
+                        revision INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS job_photos (
+                        job_id TEXT NOT NULL, photo_id TEXT NOT NULL,
+                        PRIMARY KEY(job_id, photo_id)
+                    );
+                    CREATE TABLE IF NOT EXISTS cameras (
+                        id TEXT PRIMARY KEY, name TEXT NOT NULL, shared INTEGER NOT NULL,
+                        model TEXT, updated_at TEXT NOT NULL
+                    );
+                    PRAGMA user_version=2;
+                """)
             with db:
                 yield db
         finally:
@@ -148,8 +166,30 @@ class Catalog:
                 ),
             )
 
+    @staticmethod
+    def _upsert_cameras(db, cameras: list[dict]) -> None:
+        observed = now()
+        for camera in cameras:
+            db.execute(
+                """
+                INSERT INTO cameras VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET name=excluded.name, shared=excluded.shared,
+                    model=excluded.model, updated_at=excluded.updated_at
+            """,
+                (
+                    camera["id"],
+                    str(camera.get("name") or ""),
+                    1 if camera.get("shared") else 0,
+                    camera.get("model"),
+                    observed,
+                ),
+            )
+
     async def remember(self, photos: list[dict]) -> None:
         await self._run(self._upsert, photos)
+
+    async def remember_cameras(self, cameras: list[dict]) -> None:
+        await self._run(self._upsert_cameras, cameras)
 
     async def get(self, photo_id: str) -> dict | None:
         def get(db):
@@ -167,6 +207,7 @@ class Catalog:
         favorites_only: bool = False,
         limit: int = 50,
         cursor: str | None = None,
+        has_video: bool | None = None,
     ) -> dict:
         if not 1 <= limit <= 500:
             raise SpypointError("Catalog page limit must be between 1 and 500.")
@@ -180,6 +221,7 @@ class Catalog:
             before,
             sorted(set(tags or [])),
             favorites_only,
+            has_video,
         ]
         digest = hashlib.sha256(json.dumps(spec).encode()).hexdigest()
         boundary = None
@@ -201,7 +243,7 @@ class Catalog:
                 ) from None
 
         def search(db):
-            clauses, params = selection(camera_ids, after, before, tags, favorites_only)
+            clauses, params = selection(camera_ids, after, before, tags, favorites_only, has_video)
             if boundary:
                 clauses.append("(date < ? OR (date = ? AND id < ?))")
                 params.extend([boundary["date"], boundary["date"], boundary["id"]])
@@ -232,6 +274,8 @@ class Catalog:
         before: str | None = None,
         tags: list[str] | None = None,
         limit: int = 10000,
+        favorites_only: bool = False,
+        has_video: bool | None = None,
     ) -> dict:
         """Read one consistent, bounded SQLite snapshot for analytics and export."""
         if not 1 <= limit <= 50000:
@@ -242,14 +286,19 @@ class Catalog:
             raise SpypointError("after must not be later than before.")
 
         def read(db):
-            clauses, params = selection(camera_ids, after, before, tags, False)
+            clauses, params = selection(camera_ids, after, before, tags, favorites_only, has_video)
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = db.execute(
                 "SELECT metadata FROM photos" + where + " ORDER BY date DESC, id DESC LIMIT ?",
                 [*params, limit + 1],
             ).fetchall()
+            camera_names = {
+                row["id"]: row["name"]
+                for row in db.execute("SELECT id, name FROM cameras").fetchall()
+            }
             return {
                 "photos": [json.loads(row[0]) for row in rows[:limit]],
+                "camera_names": camera_names,
                 "truncated": len(rows) > limit,
                 "scope": "local_catalog",
                 "queried_at": now(),
@@ -306,14 +355,16 @@ class Catalog:
         return await self._run(get)
 
     async def seen_in_job(self, job_id: str, photo_ids: list[str]) -> set[str]:
+        if not photo_ids:
+            return set()
+
         def get(db):
-            return {
-                pid
-                for pid in photo_ids
-                if db.execute(
-                    "SELECT 1 FROM job_photos WHERE job_id=? AND photo_id=?", (job_id, pid)
-                ).fetchone()
-            }
+            placeholders = ",".join("?" for _ in photo_ids)
+            rows = db.execute(
+                f"SELECT photo_id FROM job_photos WHERE job_id=? AND photo_id IN ({placeholders})",
+                [job_id, *photo_ids],
+            ).fetchall()
+            return {row[0] for row in rows}
 
         return await self._run(get)
 
@@ -348,12 +399,15 @@ class Catalog:
                 "cameras": [
                     dict(row)
                     for row in db.execute(
-                        "SELECT camera_id, count(*) AS photos, min(date) AS oldest, "
-                        "max(date) AS newest FROM photos GROUP BY camera_id ORDER BY camera_id"
+                        "SELECT photos.camera_id, cameras.name AS camera_name, "
+                        "count(*) AS photos, min(photos.date) AS oldest, "
+                        "max(photos.date) AS newest FROM photos "
+                        "LEFT JOIN cameras ON cameras.id = photos.camera_id "
+                        "GROUP BY photos.camera_id ORDER BY photos.camera_id"
                     )
                 ],
                 "scope": "local_catalog",
-                "schema_version": 1,
+                "schema_version": 2,
             }
 
         return await self._run(summary)

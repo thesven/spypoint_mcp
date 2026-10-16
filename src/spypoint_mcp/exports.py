@@ -27,9 +27,11 @@ def export(window: dict, root: Path, format: str) -> dict:
     else:
         buffer = io.StringIO(newline="")
         writer = csv.writer(buffer)
+        camera_names = window.get("camera_names") or {}
         keys = (
             "id",
             "camera_id",
+            "camera_name",
             "date",
             "captured_at",
             "uploaded_at",
@@ -44,6 +46,8 @@ def export(window: dict, root: Path, format: str) -> dict:
                     csv_cell(
                         json.dumps(photo.get(key, []), ensure_ascii=False)
                         if key == "tags"
+                        else camera_names.get(photo.get("camera_id"))
+                        if key == "camera_name"
                         else photo.get(key)
                     )
                     for key in keys

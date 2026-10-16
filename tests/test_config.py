@@ -47,12 +47,27 @@ def test_no_implicit_env_discovery(tmp_path, monkeypatch):
     "name,value",
     [
         ("TIMEOUT_SECONDS", "nan"),
+        ("TIMEOUT_SECONDS", "inf"),
         ("TIMEOUT_SECONDS", "bad"),
         ("MAX_IMAGE_BYTES", "1"),
+        ("MAX_VIDEO_BYTES", "1"),
         ("INCLUDE_SHARED", "yes"),
+        ("CAMERA_TIMEZONE", "Not/AZone"),
+        ("CAMERA_TIME_MODE", "invalid"),
+        ("CAMERA_TIME_MODE", "wall_clock_z"),
     ],
 )
 def test_invalid_config_rejected(monkeypatch, name, value):
     monkeypatch.setenv("SPYPOINT_" + name, value)
     with pytest.raises(SpypointError):
         Settings.load()
+
+
+def test_include_shared_false_and_wall_clock_z_mode_loaded_as_expected(monkeypatch):
+    monkeypatch.setenv("SPYPOINT_INCLUDE_SHARED", "false")
+    monkeypatch.setenv("SPYPOINT_CAMERA_TIMEZONE", "America/Toronto")
+    monkeypatch.setenv("SPYPOINT_CAMERA_TIME_MODE", "wall_clock_z")
+    settings = Settings.load()
+    assert settings.include_shared is False
+    assert settings.camera_timezone == "America/Toronto"
+    assert settings.camera_time_mode == "wall_clock_z"

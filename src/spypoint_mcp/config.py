@@ -1,8 +1,10 @@
 """Explicit configuration; never search parent directories for credentials."""
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
@@ -23,6 +25,7 @@ class Settings:
     max_image_bytes: int = 10_000_000
     image_hosts: tuple[str, ...] = ()
     camera_timezone: str | None = None
+    camera_time_mode: Literal["strict", "wall_clock_z"] = "strict"
     state_dir: Path | None = None
     http_token: str = field(default="", repr=False)
     max_video_bytes: int = 100_000_000
@@ -51,6 +54,13 @@ class Settings:
                 raise SpypointError(
                     "SPYPOINT_CAMERA_TIMEZONE must be a valid IANA timezone."
                 ) from None
+        camera_time_mode = get("CAMERA_TIME_MODE", "strict").lower()
+        if camera_time_mode not in {"strict", "wall_clock_z"}:
+            raise SpypointError("SPYPOINT_CAMERA_TIME_MODE must be strict or wall_clock_z.")
+        if camera_time_mode == "wall_clock_z" and not camera_timezone:
+            raise SpypointError(
+                "SPYPOINT_CAMERA_TIME_MODE=wall_clock_z requires SPYPOINT_CAMERA_TIMEZONE."
+            )
         state_dir = Path(get("STATE_DIR", ".spypoint-state")).expanduser()
         if shared not in {"true", "false"}:
             raise SpypointError("SPYPOINT_INCLUDE_SHARED must be true or false.")
@@ -60,7 +70,11 @@ class Settings:
             max_video_bytes = int(get("MAX_VIDEO_BYTES", "100000000"))
         except ValueError:
             raise SpypointError("Invalid numeric SPYPOINT configuration.") from None
-        if not 1 <= timeout <= 120 or not 1024 <= max_bytes <= 50_000_000:
+        if (
+            not math.isfinite(timeout)
+            or not 1 <= timeout <= 120
+            or not 1024 <= max_bytes <= 50_000_000
+        ):
             raise SpypointError("Timeout must be 1–120 seconds; image limit 1024–50000000 bytes.")
         if not 1024 <= max_video_bytes <= 500_000_000:
             raise SpypointError("SPYPOINT_MAX_VIDEO_BYTES must be between 1024 and 500000000.")
@@ -69,13 +83,14 @@ class Settings:
             password=get("PASSWORD"),
             token=get("TOKEN"),
             download_dir=(root / target).resolve(),
-            include_shared=shared,
+            include_shared=shared == "true",
             timeout=timeout,
             max_image_bytes=max_bytes,
             image_hosts=tuple(
                 x.strip().lower() for x in get("IMAGE_HOSTS").split(",") if x.strip()
             ),
             camera_timezone=camera_timezone,
+            camera_time_mode=camera_time_mode,  # type: ignore[arg-type]
             state_dir=(root / state_dir).resolve(),
             http_token=get("MCP_HTTP_TOKEN"),
             max_video_bytes=max_video_bytes,

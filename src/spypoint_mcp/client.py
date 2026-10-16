@@ -1,6 +1,7 @@
 """Small read-only adapter for the community-documented SPYPOINT v3 API."""
 
 import asyncio
+import math
 import re
 import time
 from collections import OrderedDict
@@ -152,7 +153,10 @@ class SpypointClient:
                 delay = 0.5 * (2**attempt)
                 if response.headers.get("retry-after"):
                     try:
-                        delay = max(delay, float(response.headers["retry-after"]))
+                        retry_after = float(response.headers["retry-after"])
+                        if not math.isfinite(retry_after) or retry_after < 0:
+                            raise ValueError
+                        delay = max(delay, retry_after)
                     except ValueError:
                         # HTTP-date Retry-After values are not guessed or retried early.
                         raise SpypointError("SPYPOINT asked us to wait. Try again later.") from None
@@ -273,7 +277,16 @@ class SpypointClient:
     def photo_timestamp(self, value: str) -> str:
         """Normalize upstream capture times without guessing a naive camera timezone."""
         try:
+            if not isinstance(value, str):
+                raise TypeError
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if (
+                parsed.tzinfo is not None
+                and self.settings.camera_time_mode == "wall_clock_z"
+                and self.settings.camera_timezone
+                and value.strip().endswith(("Z", "z", "+00:00", "-00:00"))
+            ):
+                parsed = parsed.replace(tzinfo=None)
             if parsed.tzinfo is not None:
                 return timestamp(value)
             if not self.settings.camera_timezone:
@@ -309,7 +322,8 @@ class SpypointClient:
         identifier({"id": camera_id})
         identifier({"id": photo_id})
         """Owned-photo detail is documented in the current web app; shared detail is not."""
-        await self.cameras()
+        if self._camera_shared is None:
+            await self.cameras()
         if camera_id not in (self._camera_shared or {}):
             raise SpypointError("Camera is not accessible in the current account.")
         if self._camera_shared[camera_id]:

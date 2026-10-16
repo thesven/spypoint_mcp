@@ -6,7 +6,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from functools import wraps
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
@@ -20,11 +20,14 @@ from .client import SpypointClient
 from .config import Settings, SpypointError
 from .exports import export
 from .schemas import (
+    ActivitySummary,
     Camera,
     CameraInventory,
+    CatalogExport,
     CatalogPage,
     CatalogStatus,
     Download,
+    FleetHealth,
     Photo,
     PhotoFilters,
     PhotoPage,
@@ -108,7 +111,7 @@ def create_server(
     @safe_tool
     async def list_cameras(ctx: Context, name_contains: str | None = None) -> CameraInventory:
         """List all owned and enabled shared cameras, status, and any discovery failures."""
-        result = await ctx.request_context.lifespan_context.client.cameras()
+        result = await ctx.request_context.lifespan_context.cameras()
         if name_contains is not None:
             query = name_contains.casefold()
             result["cameras"] = [
@@ -122,7 +125,7 @@ def create_server(
     @safe_tool
     async def get_camera(camera_id: str, ctx: Context) -> Camera:
         """Get one accessible camera's name, model, battery, signal, memory and last update."""
-        inventory = await ctx.request_context.lifespan_context.client.cameras()
+        inventory = await ctx.request_context.lifespan_context.cameras()
         for camera in inventory["cameras"]:
             if camera["id"] == camera_id:
                 return Camera.model_validate(camera)
@@ -214,14 +217,19 @@ def create_server(
 
     @server.tool(annotations=WRITE)
     @safe_tool
-    async def download_photo(photo_id: str, ctx: Context, size: Size = "large") -> Download:
+    async def download_photo(
+        photo_id: str,
+        ctx: Context,
+        size: Size = "large",
+        camera_id: str | None = None,
+    ) -> Download:
         """Save one listed photo to the configured local folder; returns path and SHA-256.
 
         Does not overwrite existing files. No destination path or URL is accepted.
         hd downloads only an already available image and never purchases one.
         """
         service = ctx.request_context.lifespan_context
-        await service.resolve_photo(photo_id)
+        await service.resolve_photo(photo_id, camera_id)
         return Download.model_validate(await service.download(photo_id, size))
 
     @server.tool(annotations=WRITE)
@@ -230,6 +238,7 @@ def create_server(
         photo_id: str,
         ctx: Context,
         size: Literal["sdVideo", "hdVideo", "streamVideo"] = "sdVideo",
+        camera_id: str | None = None,
     ) -> Download:
         """Save an already available MP4 video locally, with a SHA-256 integrity record.
 
@@ -238,7 +247,7 @@ def create_server(
         are not downloaded. Returns a local path; no inline MCP video block is emitted.
         """
         service = ctx.request_context.lifespan_context
-        await service.resolve_photo(photo_id)
+        await service.resolve_photo(photo_id, camera_id)
         return Download.model_validate(await service.download(photo_id, size))
 
     @server.tool(annotations=READ)
@@ -271,6 +280,7 @@ def create_server(
         before: str | None = None,
         tags: list[str] | None = None,
         favorites_only: bool = False,
+        has_video: bool | None = None,
         limit: Annotated[int, Field(ge=1, le=500)] = 50,
         cursor: str | None = None,
     ) -> CatalogPage:
@@ -281,7 +291,7 @@ def create_server(
         """
         return CatalogPage.model_validate(
             await ctx.request_context.lifespan_context.catalog.search(
-                camera_ids, after, before, tags, favorites_only, limit, cursor
+                camera_ids, after, before, tags, favorites_only, limit, cursor, has_video
             )
         )
 
@@ -366,18 +376,20 @@ def create_server(
         stale_hours: Annotated[float, Field(gt=0, le=8760)] = 24,
         signal_threshold: Annotated[float, Field(ge=0, le=100)] = 20,
         memory_threshold: Annotated[float, Field(ge=0, le=100)] = 90,
-    ) -> dict[str, Any]:
+    ) -> FleetHealth:
         """Assess reported fleet telemetry for stale status, low signal and full memory.
 
         Unknown units/measurements remain unknown. This is not a real-time camera ping.
         """
-        api = ctx.request_context.lifespan_context.client
-        return fleet_health(
-            await api.cameras(),
-            api.photo_timestamp,
-            stale_hours,
-            signal_threshold,
-            memory_threshold,
+        service = ctx.request_context.lifespan_context
+        return FleetHealth.model_validate(
+            fleet_health(
+                await service.cameras(),
+                service.client.photo_timestamp,
+                stale_hours,
+                signal_threshold,
+                memory_threshold,
+            )
         )
 
     @server.tool(annotations=READ)
@@ -388,9 +400,12 @@ def create_server(
         after: str | None = None,
         before: str | None = None,
         tags: list[str] | None = None,
+        favorites_only: bool = False,
+        has_video: bool | None = None,
         timezone_name: str = "UTC",
+        reinterpret_utc_as_local: bool = False,
         limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
-    ) -> dict[str, Any]:
+    ) -> ActivitySummary:
         """Summarize indexed photo activity by camera, day, hour, weekday and tag.
 
         Uses a consistent local catalog snapshot. Counts are photos, not animals or
@@ -399,17 +414,24 @@ def create_server(
         """
         timezone(timezone_name)
         window = await ctx.request_context.lifespan_context.catalog.window(
-            camera_ids, after, before, tags, limit
+            camera_ids, after, before, tags, limit, favorites_only, has_video
         )
         result = await asyncio.to_thread(
-            summarize, window["photos"], timezone_name, window["truncated"]
+            summarize,
+            window["photos"],
+            timezone_name,
+            window["truncated"],
+            reinterpret_utc_as_local,
+            window.get("camera_names"),
         )
-        return {
-            **result,
-            "queried_at": window["queried_at"],
-            "after": window["after"],
-            "before": window["before"],
-        }
+        return ActivitySummary.model_validate(
+            {
+                **result,
+                "queried_at": window["queried_at"],
+                "after": window["after"],
+                "before": window["before"],
+            }
+        )
 
     @server.tool(annotations=READ)
     @safe_tool
@@ -439,16 +461,22 @@ def create_server(
         after: str | None = None,
         before: str | None = None,
         tags: list[str] | None = None,
+        favorites_only: bool = False,
+        has_video: bool | None = None,
         limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
-    ) -> dict[str, Any]:
+    ) -> CatalogExport:
         """Export a bounded catalog snapshot to local CSV/JSON with a SHA-256 coverage manifest.
 
         Saves generated filenames under the configured download directory. CSV cells
         are escaped against spreadsheet formulas. Exports include metadata, not image binaries.
         """
         service = ctx.request_context.lifespan_context
-        window = await service.catalog.window(camera_ids, after, before, tags, limit)
-        return await asyncio.to_thread(export, window, service.client.settings.download_dir, format)
+        window = await service.catalog.window(
+            camera_ids, after, before, tags, limit, favorites_only, has_video
+        )
+        return CatalogExport.model_validate(
+            await asyncio.to_thread(export, window, service.client.settings.download_dir, format)
+        )
 
     @server.resource("spypoint://guide")
     def guide() -> str:
