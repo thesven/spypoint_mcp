@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from conftest import PNG, photo
 from mcp import Client
@@ -201,3 +202,45 @@ def test_nonfinite_memory_is_unknown():
     camera = result["cameras"][0]
     assert camera["memory_used_percentage"] is None
     assert "memory_usage" in camera["unknown_measurements"]
+
+
+def test_activity_detects_wall_clock_z_skew_and_supports_reinterpretation():
+    raw = photo("skew1", date="2026-09-20T16:00:30.000Z")
+    raw["originDate"] = "2026-09-20T12:00:00.000Z"
+    summary_row = photo_summary(raw)
+    default_summary = summarize([summary_row], "America/Toronto", False)
+    assert default_summary["suspected_wall_clock_z_photos"] == 1
+    assert default_summary["timestamp_warnings"]
+    assert default_summary["by_local_hour"]["8"] == 1
+
+    reinterpreted = summarize(
+        [summary_row],
+        "America/Toronto",
+        False,
+        reinterpret_utc_as_local=True,
+        camera_names={"c1": "North Ridge"},
+    )
+    assert reinterpreted["suspected_wall_clock_z_photos"] == 1
+    assert not reinterpreted["timestamp_warnings"]
+    assert reinterpreted["by_local_hour"]["12"] == 1
+    assert reinterpreted["by_camera"][0]["camera_name"] == "North Ridge"
+
+    # Already normalized during ingestion via SPYPOINT_CAMERA_TIME_MODE=wall_clock_z:
+    already_normalized = {**summary_row, "date": "2026-09-20T16:00:00.000Z"}
+    clean = summarize([already_normalized], "America/Toronto", False, reinterpret_utc_as_local=True)
+    assert clean["suspected_wall_clock_z_photos"] == 0
+    assert not clean["timestamp_warnings"]
+    assert clean["by_local_hour"]["12"] == 1
+
+
+async def test_download_with_camera_id_after_restart_and_published_schemas(api, fake):
+    fake.overrides["/api/v3/photo/c1/p1"] = lambda r: httpx.Response(200, json=photo())
+    async with Client(create_server(client=api), raise_exceptions=True) as mcp:
+        tools = {t.name: t for t in (await mcp.list_tools()).tools}
+        for name in ("camera_health", "summarize_activity", "export_catalog"):
+            assert tools[name].output_schema is not None
+        saved = await mcp.call_tool("download_photo", {"photo_id": "p1", "camera_id": "c1"})
+        assert not saved.is_error
+        assert Path(saved.structured_content["path"]).read_bytes() == PNG
+        mismatch = await mcp.call_tool("view_photo", {"photo_id": "p1", "camera_id": "other"})
+        assert mismatch.is_error and "does not belong" in mismatch.content[0].text

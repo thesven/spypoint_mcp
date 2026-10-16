@@ -197,3 +197,33 @@ async def test_sync_mcp_resources_prompts_and_roundtrip(api):
         assert "timestamp" in guide.contents[0].text
         prompts = await mcp.list_prompts()
         assert {p.name for p in prompts.prompts} == {"review_camera_fleet", "archive_camera_photos"}
+
+
+async def test_catalog_v1_migration_future_version_rejection_and_video_filter(api):
+    import sqlite3
+    from contextlib import closing
+
+    service = PhotoService(api)
+    await service.list_photos()
+    status = await service.catalog.summary()
+    assert status["schema_version"] == 2
+    assert status["cameras"][0]["camera_name"] == "Field"
+
+    raw_video = photo("p_vid", "c1", "2026-09-21T12:00:00.000Z")
+    raw_video["sdVideo"] = {"host": "s3.amazonaws.com", "path": "clip.mp4"}
+    await service.catalog.remember([photo_summary(raw_video)])
+    videos_only = await service.catalog.search(has_video=True)
+    assert [p["id"] for p in videos_only["photos"]] == ["p_vid"]
+    stills_only = await service.catalog.search(has_video=False)
+    assert [p["id"] for p in stills_only["photos"]] == ["p1"]
+
+    with closing(sqlite3.connect(service.catalog.path)) as db, db:
+        db.execute("DROP TABLE cameras")
+        db.execute("PRAGMA user_version=1")
+    migrated = await service.catalog.summary()
+    assert migrated["schema_version"] == 2 and migrated["photos"] == 2
+
+    with closing(sqlite3.connect(service.catalog.path)) as db, db:
+        db.execute("PRAGMA user_version=99")
+    with pytest.raises(SpypointError, match="newer server"):
+        await service.catalog.summary()

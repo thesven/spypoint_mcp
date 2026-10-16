@@ -15,16 +15,71 @@ def timezone(name: str) -> ZoneInfo:
         raise SpypointError("Use a valid IANA timezone such as America/Toronto or UTC.") from None
 
 
-def summarize(photos: list[dict], timezone_name: str, truncated: bool) -> dict:
+def _is_unshifted_wall_clock_z(photo: dict) -> bool:
+    captured = photo.get("captured_at")
+    date = photo.get("date")
+    if not (isinstance(captured, str) and isinstance(date, str)):
+        return False
+    if not captured.strip().endswith(("Z", "z", "+00:00", "-00:00")):
+        return False
+    try:
+        cap = datetime.fromisoformat(captured.replace("Z", "+00:00")).astimezone(UTC)
+        norm = datetime.fromisoformat(date.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return False
+    return abs((cap - norm).total_seconds()) < 1
+
+
+def _suspected_wall_clock_z(photo: dict, zone: ZoneInfo) -> bool:
+    uploaded = photo.get("uploaded_at")
+    date = photo.get("date")
+    if not (
+        _is_unshifted_wall_clock_z(photo) and isinstance(uploaded, str) and isinstance(date, str)
+    ):
+        return False
+    try:
+        cap = datetime.fromisoformat(date.replace("Z", "+00:00")).astimezone(UTC)
+        upl = datetime.fromisoformat(uploaded.replace("Z", "+00:00")).astimezone(UTC)
+    except ValueError:
+        return False
+    if (cap - upl).total_seconds() > 60:
+        return True
+    wall_local = cap.replace(tzinfo=zone)
+    offset = wall_local.utcoffset()
+    if not offset or abs(offset.total_seconds()) < 1800:
+        return False
+    raw_lag = abs((upl - cap).total_seconds())
+    wall_lag = (upl - wall_local.astimezone(UTC)).total_seconds()
+    return raw_lag >= 1800 and -60 <= wall_lag <= 900
+
+
+def summarize(
+    photos: list[dict],
+    timezone_name: str,
+    truncated: bool,
+    reinterpret_utc_as_local: bool = False,
+    camera_names: dict[str, str] | None = None,
+) -> dict:
     zone = timezone(timezone_name)
     hours = Counter()
     weekdays = Counter()
     days = Counter()
     buckets = Counter()
     tags = Counter()
+    suspected_wall_clock_z = 0
     cameras = defaultdict(lambda: {"photos": 0, "tags": Counter(), "first": None, "last": None})
     for photo in photos:
-        dt = datetime.fromisoformat(photo["date"].replace("Z", "+00:00")).astimezone(zone)
+        parsed = datetime.fromisoformat(photo["date"].replace("Z", "+00:00"))
+        if (
+            reinterpret_utc_as_local
+            and photo["date"].endswith("Z")
+            and (photo.get("captured_at") is None or _is_unshifted_wall_clock_z(photo))
+        ):
+            dt = parsed.replace(tzinfo=zone)
+        else:
+            dt = parsed.astimezone(zone)
+        if _suspected_wall_clock_z(photo, zone):
+            suspected_wall_clock_z += 1
         day = dt.date().isoformat()
         hours[str(dt.hour)] += 1
         weekdays[str(dt.weekday())] += 1
@@ -38,18 +93,33 @@ def summarize(photos: list[dict], timezone_name: str, truncated: bool) -> dict:
         camera["tags"].update(unique_tags)
         camera["first"] = min(camera["first"] or photo["date"], photo["date"])
         camera["last"] = max(camera["last"] or photo["date"], photo["date"])
+    warnings: list[str] = []
+    if suspected_wall_clock_z and not reinterpret_utc_as_local:
+        warnings.append(
+            f"{suspected_wall_clock_z} photo(s) have capture/upload skew suggesting local "
+            "wall-clock times stamped with Z; verify burned-in image timestamps or set "
+            "reinterpret_utc_as_local=true."
+        )
     return {
         "scope": "local_catalog",
         "photo_count": len(photos),
         "truncated": truncated,
         "timezone": timezone_name,
+        "reinterpret_utc_as_local": reinterpret_utc_as_local,
+        "suspected_wall_clock_z_photos": suspected_wall_clock_z,
+        "timestamp_warnings": warnings,
         "by_day": dict(sorted(days.items())),
         "by_local_hour": {str(i): hours[str(i)] for i in range(24)},
         "by_weekday": {str(i): weekdays[str(i)] for i in range(7)},
         "hourly_timeline": dict(sorted(buckets.items())),
         "tag_counts": dict(tags.most_common()),
         "by_camera": [
-            {"camera_id": cid, **value, "tags": dict(value["tags"])}
+            {
+                "camera_id": cid,
+                "camera_name": (camera_names or {}).get(cid),
+                **value,
+                "tags": dict(value["tags"]),
+            }
             for cid, value in sorted(cameras.items())
         ],
         "interpretation": "Counts describe indexed photographs, not unique animals, visits, or "
@@ -92,7 +162,12 @@ def fleet_health(
         signal = camera.get("signal")
         signal = signal.get("processed", {}) if isinstance(signal, dict) else {}
         signal = signal.get("percentage") if isinstance(signal, dict) else None
-        if isinstance(signal, (int, float)) and not isinstance(signal, bool) and 0 <= signal <= 100:
+        if (
+            isinstance(signal, (int, float))
+            and not isinstance(signal, bool)
+            and math.isfinite(signal)
+            and 0 <= signal <= 100
+        ):
             if signal < signal_threshold:
                 findings.append("low_signal")
         else:

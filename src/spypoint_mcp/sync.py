@@ -27,7 +27,7 @@ class SyncEngine:
         after = timestamp(after) if after else None
         if after and after > before:
             raise SpypointError("after must not be later than before.")
-        inventory = await self.service.client.cameras()
+        inventory = await self.service.cameras()
         known = {c["id"] for c in inventory["cameras"]}
         selected = sorted(known if camera_ids is None else set(camera_ids))
         if not set(selected) <= known:
@@ -72,7 +72,7 @@ class SyncEngine:
         catalog = self.service.catalog
         state = await catalog.get_job(job_id)
         # Revalidate current account access after a restart or a revoked share.
-        inventory = await self.service.client.cameras()
+        inventory = await self.service.cameras()
         known = {c["id"] for c in inventory["cameras"]}
         entries = state["cameras"]
         attempted: set[int] = set()

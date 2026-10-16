@@ -82,6 +82,7 @@ class PhotoFilters(Output):
 
 class CameraCoverage(Output):
     camera_id: str
+    camera_name: str | None = None
     photos: int
     oldest: str
     newest: str
@@ -126,3 +127,75 @@ class SyncJob(Output):
 
 class SyncJobs(Output):
     jobs: list[SyncJob]
+
+
+class CameraHealth(Output):
+    camera_id: str
+    name: str
+    status: Literal["ok", "attention", "unknown"]
+    findings: list[str]
+    unknown_measurements: list[str]
+    hours_since_update: float | None = None
+    signal_percentage: float | None = None
+    memory_used_percentage: float | None = None
+    batteries: Any = None
+
+
+class HealthThresholds(Output):
+    stale_hours: float
+    signal_below: float
+    memory_at_or_above: float
+
+
+class FleetHealth(Output):
+    cameras: list[CameraHealth]
+    checked_at: str
+    complete: bool
+    warnings: list[str]
+    thresholds: HealthThresholds
+    note: str
+
+
+class CameraActivity(Output):
+    camera_id: str
+    camera_name: str | None = None
+    photos: int
+    tags: dict[str, int]
+    first: str | None
+    last: str | None
+
+
+class ActivitySummary(Output):
+    scope: Literal["local_catalog"]
+    photo_count: int
+    truncated: bool
+    timezone: str
+    reinterpret_utc_as_local: bool = False
+    suspected_wall_clock_z_photos: int = 0
+    timestamp_warnings: list[str] = Field(default_factory=list)
+    by_day: dict[str, int]
+    by_local_hour: dict[str, int]
+    by_weekday: dict[str, int]
+    hourly_timeline: dict[str, int]
+    tag_counts: dict[str, int]
+    by_camera: list[CameraActivity]
+    interpretation: str
+    queried_at: str
+    after: str | None = None
+    before: str | None = None
+
+
+class CatalogExport(Output):
+    format: Literal["csv", "json"]
+    rows: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes: int = Field(ge=0)
+    truncated: bool
+    scope: Literal["local_catalog"]
+    queried_at: str
+    after: str | None = None
+    before: str | None = None
+    data_file: str
+    note: str
+    path: str
+    manifest_path: str

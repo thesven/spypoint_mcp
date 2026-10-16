@@ -9,6 +9,7 @@ from pathlib import Path
 from .catalog import Catalog
 from .client import VIDEO_SIZES, SpypointClient, photo_summary
 from .config import SpypointError
+from .schemas import CameraInventory
 
 
 class PhotoService:
@@ -22,6 +23,18 @@ class PhotoService:
             self._catalog = Catalog(self.client.settings)
         return self._catalog
 
+    async def cameras(self) -> dict:
+        inventory = await self.client.cameras()
+        CameraInventory.model_validate(inventory)
+        await self.catalog.remember_cameras(inventory["cameras"])
+        return {**inventory, "cameras": list(inventory["cameras"])}
+
+    def _normalized_summary(self, raw: dict) -> dict:
+        summary = photo_summary(raw)
+        if summary.get("date"):
+            summary["date"] = self.client.photo_timestamp(summary["date"])
+        return summary
+
     async def photo_detail(self, camera_id: str, photo_id: str) -> dict:
         result = await self.client.photo(camera_id, photo_id)
         result["date"] = self.client.photo_timestamp(result["date"])
@@ -34,8 +47,10 @@ class PhotoService:
             raw = self.client.cached_photo(photo_id)
             if camera_id is not None and raw.get("camera") != camera_id:
                 raise SpypointError("Photo does not belong to the requested camera.")
-            return photo_summary(raw)
-        except SpypointError:
+            return self._normalized_summary(raw)
+        except SpypointError as exc:
+            if "does not belong" in str(exc):
+                raise
             stored = await self.catalog.get(photo_id)
             selected = camera_id or (stored["camera_id"] if stored else None)
             if selected is None:
@@ -51,20 +66,24 @@ class PhotoService:
 
         if not 1 <= len(photo_ids) <= 12 or len(set(photo_ids)) != len(photo_ids):
             raise SpypointError("Select 1–12 distinct photo IDs for a contact sheet.")
-        tiles = []
-        for photo_id in photo_ids:
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch_tile(photo_id: str) -> tuple[dict, bytes | None]:
             metadata = {"photo_id": photo_id}
-            try:
-                photo = await self.resolve_photo(photo_id)
-                metadata.update(camera_id=photo["camera_id"], date=photo["date"])
-                data, _ = await self.client.image(photo_id, size)
-                tiles.append((metadata, data))
-            except SpypointError as exc:
-                tiles.append(({**metadata, "error": str(exc)}, None))
+            async with semaphore:
+                try:
+                    photo = await self.resolve_photo(photo_id)
+                    metadata.update(camera_id=photo["camera_id"], date=photo["date"])
+                    data, _ = await self.client.image(photo_id, size)
+                    return (metadata, data)
+                except SpypointError as exc:
+                    return ({**metadata, "error": str(exc)}, None)
+
+        tiles = list(await asyncio.gather(*(fetch_tile(pid) for pid in photo_ids)))
         return await asyncio.to_thread(contact_sheet, tiles, columns, tile_width)
 
     async def list_photos(self, camera_ids: list[str] | None = None, **filters) -> dict:
-        inventory = await self.client.cameras()
+        inventory = await self.cameras()
         known = {c["id"] for c in inventory["cameras"]}
         selected = sorted(known) if camera_ids is None else list(dict.fromkeys(camera_ids))
         if not set(selected) <= known:
@@ -89,7 +108,7 @@ class PhotoService:
     ) -> tuple[dict, list[tuple[dict, bytes, str]]]:
         if offset < 0 or not 1 <= camera_limit <= 5:
             raise SpypointError("offset must be nonnegative and camera_limit between 1 and 5.")
-        inventory = await self.client.cameras()
+        inventory = await self.cameras()
         cameras = inventory["cameras"]
         selected = cameras[offset : offset + camera_limit]
         entries = []
@@ -173,7 +192,7 @@ class PhotoService:
             "bytes": len(data),
             "mime_type": mime,
             "sha256": hashlib.sha256(data).hexdigest(),
-            "photo": photo_summary(raw),
+            "photo": self._normalized_summary(raw),
             "size": size,
         }
         await self.catalog.record_download(result)

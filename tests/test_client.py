@@ -245,3 +245,21 @@ async def test_api_drift_does_not_look_like_no_cameras(api, fake, response):
     fake.overrides["/api/v3/camera/all"] = lambda r: response
     with pytest.raises(SpypointError):
         await api.cameras()
+
+
+async def test_include_shared_false_skips_shared_camera_endpoints(api, fake):
+    fake.shared = [{"sharedCameras": [{"cameraId": "c2"}]}]
+    api.settings = replace(api.settings, include_shared=False)
+    result = await api.cameras()
+    assert result["shared_included"] is False
+    assert [c["id"] for c in result["cameras"]] == ["c1"]
+    assert not any("/shared-cameras" in r.url.path for r in fake.calls)
+
+
+@pytest.mark.parametrize("retry_after", ["nan", "inf", "-1", "Wed, 21 Oct 2026 07:28:00 GMT"])
+async def test_invalid_or_http_date_retry_after_rejected_cleanly(api, fake, retry_after):
+    fake.overrides["/api/v3/camera/all"] = lambda r: httpx.Response(
+        429, headers={"Retry-After": retry_after}
+    )
+    with pytest.raises(SpypointError, match="wait"):
+        await api.cameras()

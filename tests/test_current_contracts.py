@@ -81,3 +81,13 @@ def test_naive_camera_time_requires_configuration_and_checks_dst(api):
     for date in ("2026-11-01 01:30:00", "2026-03-08 02:30:00"):
         with pytest.raises(SpypointError, match="Ambiguous"):
             api.photo_timestamp(date)
+
+
+def test_wall_clock_z_reinterprets_mislabeled_utc_suffix_in_camera_timezone(api):
+    api.settings = replace(
+        api.settings, camera_timezone="America/Toronto", camera_time_mode="wall_clock_z"
+    )
+    assert api.photo_timestamp("2026-09-20T12:00:00.000Z") == "2026-09-20T16:00:00.000Z"
+    assert api.photo_timestamp("2026-09-20T12:00:00-04:00") == "2026-09-20T16:00:00.000Z"
+    with pytest.raises(SpypointError, match="Ambiguous"):
+        api.photo_timestamp("2026-11-01T01:30:00.000Z")

@@ -279,10 +279,11 @@ interactive input or a keyboard interrupt. Inspect the JSON job state as well as
 Photo listing/catalog `date` is normalized capture time from `originDate`, falling back
 to upload `date` only when absent. `captured_at` and `uploaded_at` preserve their upstream values. User date
 bounds require timezone offsets. **Known limitation:** some cameras encode local wall-clock capture time with a `Z`
-suffix. Automatic conversion then gives incorrect local activity hours. Compare the
-burned-in image time with metadata before relying on timezone-based summaries; the
-current timezone setting only handles timestamps without an offset, not mislabeled `Z`
-values. Do not interpret these summaries as verified local times for affected cameras.
+suffix. Automatic conversion then gives incorrect local activity hours. `summarize_activity`
+flags suspected capture/upload skew and supports `reinterpret_utc_as_local=true`; you can
+also set `SPYPOINT_CAMERA_TIME_MODE=wall_clock_z` with `SPYPOINT_CAMERA_TIMEZONE` to
+normalize mislabeled `Z` capture times during ingestion. Compare the burned-in image time
+with metadata before relying on timezone-based summaries.
 
 Upstream timestamps without an offset require an explicit
 `SPYPOINT_CAMERA_TIMEZONE`; ambiguous or nonexistent DST times are rejected.
@@ -319,7 +320,8 @@ against the working directory when no file is supplied.
 | `SPYPOINT_DOWNLOAD_DIR` | `downloads`; photos, videos and exports. |
 | `SPYPOINT_STATE_DIR` | `.spypoint-state`; per-credential-namespace SQLite catalog and checkpoints. |
 | `SPYPOINT_INCLUDE_SHARED` | `true`; include shared cameras. |
-| `SPYPOINT_CAMERA_TIMEZONE` | Unset; only supply when interpreting timezone-less upstream timestamps. |
+| `SPYPOINT_CAMERA_TIMEZONE` | Unset; supply when interpreting timezone-less or `wall_clock_z` upstream timestamps. |
+| `SPYPOINT_CAMERA_TIME_MODE` | `strict`; set to `wall_clock_z` with `SPYPOINT_CAMERA_TIMEZONE` for mislabeled `Z` local times. |
 | `SPYPOINT_TIMEOUT_SECONDS` | 30 seconds per request; allowed 1–120. |
 | `SPYPOINT_MAX_IMAGE_BYTES` | 10,000,000; allowed 1,024–50,000,000. |
 | `SPYPOINT_MAX_VIDEO_BYTES` | 100,000,000; allowed 1,024–500,000,000. |
