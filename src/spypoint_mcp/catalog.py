@@ -125,11 +125,11 @@ class Catalog:
         db.row_factory = sqlite3.Row
         try:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise SpypointError(
                     "Catalog was created by a newer server; upgrade before opening it."
                 )
-            if version < 3:
+            if version < 4:
                 db.executescript("""
                     CREATE TABLE IF NOT EXISTS photos (
                         id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, date TEXT NOT NULL,
@@ -172,7 +172,30 @@ class Catalog:
                         watermark TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
-                    PRAGMA user_version=3;
+                    CREATE TABLE IF NOT EXISTS weather_observations (
+                        grid_lat REAL NOT NULL,
+                        grid_lon REAL NOT NULL,
+                        hour_utc TEXT NOT NULL,
+                        temperature_c REAL NOT NULL,
+                        apparent_temperature_c REAL NOT NULL,
+                        relative_humidity REAL NOT NULL,
+                        dew_point_c REAL NOT NULL,
+                        pressure_hpa REAL NOT NULL,
+                        wind_speed_kmh REAL NOT NULL,
+                        wind_direction_deg REAL NOT NULL,
+                        wind_gusts_kmh REAL NOT NULL,
+                        precipitation_mm REAL NOT NULL,
+                        snowfall_cm REAL NOT NULL,
+                        cloud_cover_pct REAL NOT NULL,
+                        weather_code INTEGER NOT NULL,
+                        weather_condition TEXT NOT NULL,
+                        weather_category TEXT NOT NULL,
+                        fetched_at TEXT NOT NULL,
+                        PRIMARY KEY(grid_lat, grid_lon, hour_utc)
+                    );
+                    CREATE INDEX IF NOT EXISTS weather_grid_time
+                        ON weather_observations(grid_lat, grid_lon, hour_utc);
+                    PRAGMA user_version=4;
                 """)
             with db:
                 yield db
@@ -705,6 +728,9 @@ class Catalog:
                 "photos": db.execute("SELECT count(*) FROM photos").fetchone()[0],
                 "downloads": db.execute("SELECT count(*) FROM downloads").fetchone()[0],
                 "jobs": db.execute("SELECT count(*) FROM jobs").fetchone()[0],
+                "weather_observations": db.execute(
+                    "SELECT count(*) FROM weather_observations"
+                ).fetchone()[0],
                 "cameras": [
                     dict(row)
                     for row in db.execute(
@@ -716,7 +742,98 @@ class Catalog:
                     )
                 ],
                 "scope": "local_catalog",
-                "schema_version": 3,
+                "schema_version": 4,
             }
 
         return await self._run(summary)
+
+    async def store_weather_observations(self, observations: list[dict]) -> int:
+        if not observations:
+            return 0
+
+        def save(db):
+            for obs in observations:
+                db.execute(
+                    """
+                    INSERT INTO weather_observations VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    )
+                    ON CONFLICT(grid_lat, grid_lon, hour_utc) DO UPDATE SET
+                        temperature_c=excluded.temperature_c,
+                        apparent_temperature_c=excluded.apparent_temperature_c,
+                        relative_humidity=excluded.relative_humidity,
+                        dew_point_c=excluded.dew_point_c,
+                        pressure_hpa=excluded.pressure_hpa,
+                        wind_speed_kmh=excluded.wind_speed_kmh,
+                        wind_direction_deg=excluded.wind_direction_deg,
+                        wind_gusts_kmh=excluded.wind_gusts_kmh,
+                        precipitation_mm=excluded.precipitation_mm,
+                        snowfall_cm=excluded.snowfall_cm,
+                        cloud_cover_pct=excluded.cloud_cover_pct,
+                        weather_code=excluded.weather_code,
+                        weather_condition=excluded.weather_condition,
+                        weather_category=excluded.weather_category,
+                        fetched_at=excluded.fetched_at
+                """,
+                    (
+                        obs["grid_lat"],
+                        obs["grid_lon"],
+                        obs["hour_utc"],
+                        obs["temperature_c"],
+                        obs["apparent_temperature_c"],
+                        obs["relative_humidity"],
+                        obs["dew_point_c"],
+                        obs["pressure_hpa"],
+                        obs["wind_speed_kmh"],
+                        obs["wind_direction_deg"],
+                        obs["wind_gusts_kmh"],
+                        obs["precipitation_mm"],
+                        obs["snowfall_cm"],
+                        obs["cloud_cover_pct"],
+                        obs["weather_code"],
+                        obs["weather_condition"],
+                        obs["weather_category"],
+                        obs["fetched_at"],
+                    ),
+                )
+            return len(observations)
+
+        return await self._run(save)
+
+    async def get_cached_weather(
+        self, grid_lat: float, grid_lon: float, hours_utc: list[str]
+    ) -> dict[str, dict]:
+        if not hours_utc:
+            return {}
+
+        def read(db):
+            placeholders = ",".join("?" for _ in hours_utc)
+            rows = db.execute(
+                f"""
+                SELECT grid_lat, grid_lon, hour_utc, temperature_c, apparent_temperature_c,
+                       relative_humidity, dew_point_c, pressure_hpa, wind_speed_kmh,
+                       wind_direction_deg, wind_gusts_kmh, precipitation_mm, snowfall_cm,
+                       cloud_cover_pct, weather_code, weather_condition, weather_category,
+                       fetched_at
+                FROM weather_observations
+                WHERE grid_lat=? AND grid_lon=? AND hour_utc IN ({placeholders})
+                """,
+                [grid_lat, grid_lon, *hours_utc],
+            ).fetchall()
+            return {row["hour_utc"]: dict(row) for row in rows}
+
+        return await self._run(read)
+
+    async def get_weather_coverage(self, grid_lat: float, grid_lon: float) -> dict:
+        def read(db):
+            row = db.execute(
+                """
+                SELECT count(*) as count, min(hour_utc) as oldest, max(hour_utc) as newest
+                FROM weather_observations
+                WHERE grid_lat=? AND grid_lon=?
+                """,
+                (grid_lat, grid_lon),
+            ).fetchone()
+            return dict(row) if row else {"count": 0, "oldest": None, "newest": None}
+
+        return await self._run(read)

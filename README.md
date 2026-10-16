@@ -4,13 +4,13 @@
 ![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)
 ![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-informational)
 
-A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and CLI that connects vision-capable LLMs to your **SPYPOINT cellular trail camera fleet**. Discover owned and shared cameras, inspect and crop actual trail camera images inline, build labeled contact sheets and motion-burst strips, download existing photos and MP4 videos with SHA-256 verification, maintain a resumable local SQLite archive with private field notes and telemetry history, and analyze solunar, twilight, and activity patterns across **25 MCP tools**, **2 resources**, and **2 guided prompts**.
+A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and CLI that connects vision-capable LLMs to your **SPYPOINT cellular trail camera fleet**. Discover owned and shared cameras, inspect and crop actual trail camera images inline, build labeled contact sheets and motion-burst strips, download existing photos and MP4 videos with SHA-256 verification, maintain a resumable local SQLite archive with private field notes and telemetry history, and analyze weather, solunar, twilight, and activity patterns across **28 MCP tools**, **2 resources**, and **2 guided prompts**.
 
 > **Read-Only & Privacy-First by Design**
 > This server only reads from your SPYPOINT account. It **never** modifies camera settings, deletes cloud photos, triggers remote captures, or orders paid HD media. Account credentials and upstream signed S3/CloudFront URLs are kept strictly in process memory and are never exposed in tool arguments, tool outputs, or the local SQLite catalog.
 
 > **Compatibility Status (`v0.2.0`)**
-> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**137 tests, >91% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
+> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**144 tests, >91% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
 
 ---
 
@@ -35,8 +35,9 @@ A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) ser
 - **Fleet Discovery, Telemetry Health & Battery Trends**: Enumerate owned and shared cameras, inspect battery/signal/SD-card telemetry (`camera_health`), and persist historical telemetry snapshots (`telemetry_trends`) to compute linear battery discharge slopes (`%/day`) and estimated days until `20%` and `0%` battery.
 - **Inline Visual Inspection, ROI Zoom & Motion Burst Strips**: Return actual JPEG/PNG/WebP images as MCP `ImageContent` blocks (`latest_photos`, `view_photo`), crop and upscale normalized regions of interest (`crop_photo`) to inspect antlers, ear tags, or distant targets, build 1–12 photo comparison grids (`create_contact_sheet`), or auto-cluster chronological motion bursts into horizontal delta-labeled strips (`create_burst_strip`).
 - **Cold-Session Media Downloads**: Save existing `small`, `medium`, `large`, or `hd` photos (`download_photo`) and `sdVideo`, `hdVideo`, or `streamVideo` MP4 clips (`download_video`) to a dedicated local directory with atomic writes and SHA-256 integrity records.
-- **Account-Scoped Local SQLite Catalog (`schema_version=3`) & Private Field Notes**: Automatically indexes sanitized photo metadata and camera names (`cameras` table) isolated per credential namespace. Attach private local field notes and normalized custom tags (`annotate_photo`) and query offline (`search_catalog`) by camera, capture-time window, upstream `tags`, private `user_tags`, favorites, and video availability (`has_video`).
+- **Account-Scoped Local SQLite Catalog (`schema_version=4`) & Private Field Notes**: Automatically indexes sanitized photo metadata and camera names (`cameras` table) isolated per credential namespace. Attach private local field notes and normalized custom tags (`annotate_photo`) and query offline (`search_catalog`) by camera, capture-time window, upstream `tags`, private `user_tags`, favorites, and video availability (`has_video`).
 - **Durable Bulk Sync & Incremental High-Water Mark Polling**: Create checkpointed indexing or image-download jobs (`start_photo_sync`, `continue_photo_sync`) that survive process restarts, or run single-call incremental polling (`check_new_photos`) that tracks per-camera high-water marks in SQLite and returns only newly arrived photos since the last check.
+- **Meteorological Tracking & Animal Movement Correlates**: Automatically pull accurate hourly weather reanalysis (`get_photo_weather`) based on capture time and location (rounded to ~1.1 km grid for privacy), compute 3-hour barometric pressure trends ($\Delta P_{3h}$), 16-point wind compass directions, temperature in °C and °F, and analyze photo distributions by temperature band, barometric trend, and wind octants (`weather_activity_summary`).
 - **Timezone-Aware Solunar, Twilight & Activity Analytics**: Summarize photo counts by camera (`camera_name`), day, local hour, weekday, lunar phase (`by_moon_phase`), and solar twilight phase (`by_sun_phase`) in any IANA timezone (`summarize_activity`, `solunar_summary`), automatically detect mislabeled wall-clock `Z` timestamps, and export bounded CSV/JSON snapshots with formula-injection protection and SHA-256 coverage manifests (`export_catalog`).
 
 ---
@@ -166,7 +167,7 @@ All structured tools validate their responses against strict Pydantic output sch
 | --- | --- | --- |
 | `annotate_photo` | Write | Save or clear a private local field `note` (up to 2,000 chars) and/or custom `user_tags` (up to 20 tags) on an indexed `photo_id`. Never modifies upstream SPYPOINT account state. |
 | `search_catalog` | Read | Offline, cursor-paginated search over locally indexed photos (`camera_ids`, `after`, `before`, `tags`, `user_tags`, `favorites_only`, `has_video`, `limit` 1–500, `cursor`). All supplied tags must match. |
-| `catalog_status` | Read | Report local SQLite catalog totals (`photos`, `downloads`, `jobs`, `schema_version=3`) and per-camera coverage (`camera_id`, `camera_name`, `photos`, `oldest`, `newest`). |
+| `catalog_status` | Read | Report local SQLite catalog totals (`photos`, `downloads`, `jobs`, `weather_observations`, `schema_version=4`) and per-camera coverage (`camera_id`, `camera_name`, `photos`, `oldest`, `newest`). |
 | `summarize_activity` | Read | Aggregate local catalog activity by camera (`camera_name` included), date, local hour, weekday, tag, lunar phase (`by_moon_phase`), and solar phase (`by_sun_phase` when coordinates are provided or configured). Supports `user_tags`, `favorites_only`, `has_video`, and `reinterpret_utc_as_local`. |
 | `solunar_summary` | Read | Compute a dedicated solunar and twilight activity breakdown (`by_moon_phase`, `by_sun_phase`, `by_camera`) over the local catalog using camera GPS coordinates (`latitude`, `longitude`, or `SPYPOINT_DEFAULT_LATITUDE`/`SPYPOINT_DEFAULT_LONGITUDE`). |
 | `export_catalog` | Write | Export a bounded local catalog snapshot (`limit` up to 50,000; supports `user_tags`, `favorites_only`, and `has_video`) to UTF-8 CSV (including `camera_name`, `user_note`, and `user_tags` columns with formula-injection escaping) or JSON alongside a `.manifest.json` SHA-256 record. |
@@ -180,6 +181,14 @@ All structured tools validate their responses against strict Pydantic output sch
 | `get_sync_status` | Read | Inspect a sync job's durable per-camera checkpoints, counts, and errors offline. |
 | `list_sync_jobs` | Read | List recent sync jobs (`limit` 1–100) for the active credential namespace so interrupted archives can be resumed. |
 | `check_new_photos` | Write | Poll selected cameras (`camera_ids`, `max_pages_per_camera` 1–5, `include_images=false`, `size="medium"`) for photos newer than each camera's persisted SQLite high-water mark, indexing and returning only newly arrived photos. |
+
+### 6. Environmental Weather & Animal Tracking
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `get_photo_weather` | Read | Fetch or retrieve cached hourly meteorological conditions (temperature in °C/°F, humidity, dew point, 16-point wind compass & speed in km/h & mph, surface barometric pressure in hPa/inHg, 3-hour pressure trend $\Delta P_{3h}$, WMO code & condition category, tracking summary) for a photo by capture time and coordinates (photo GPS or `SPYPOINT_DEFAULT_LATITUDE`/`SPYPOINT_DEFAULT_LONGITUDE`). |
+| `sync_weather` | Write | Bulk-fetch and cache hourly meteorological reanalysis for indexed photos in the local catalog (`camera_ids`, `after`, `before`, `latitude`, `longitude`, `limit` 1–500, `force_refresh=false`). Skips already-cached hourly grid cells unless `force_refresh=true`. |
+| `weather_activity_summary` | Read | Correlate indexed photo activity with cached weather observations across temperature bands, 3-hour barometric pressure trends (`rising_rapidly`, `falling`, `steady`), 8 wind octants (N, NE, E, SE, S, SW, W, NW), wind speed tiers, condition categories, moon phases, and sun phases. |
 
 ### MCP Resources & Prompts
 
@@ -352,8 +361,8 @@ Configuration is loaded **only** from an explicitly provided `--env-file` and/or
 | `SPYPOINT_INCLUDE_SHARED` | `true` | Include shared cameras (`true` or `false`). |
 | `SPYPOINT_CAMERA_TIMEZONE` | *(unset)* | IANA timezone (e.g., `America/Toronto`) for naive or `wall_clock_z` camera timestamps. |
 | `SPYPOINT_CAMERA_TIME_MODE` | `strict` | Timestamp mode: `strict` (trust upstream offsets) or `wall_clock_z` (reinterpret `Z` as `SPYPOINT_CAMERA_TIMEZONE`). |
-| `SPYPOINT_DEFAULT_LATITUDE` | *(unset)* | Optional default latitude (`-90.0` to `90.0`) for `solunar_summary` and `summarize_activity` twilight calculations. |
-| `SPYPOINT_DEFAULT_LONGITUDE` | *(unset)* | Optional default longitude (`-180.0` to `180.0`) for `solunar_summary` and `summarize_activity` twilight calculations. |
+| `SPYPOINT_DEFAULT_LATITUDE` | *(unset)* | Optional default latitude (`-90.0` to `90.0`) for weather lookups, `solunar_summary`, and `summarize_activity` twilight calculations. |
+| `SPYPOINT_DEFAULT_LONGITUDE` | *(unset)* | Optional default longitude (`-180.0` to `180.0`) for weather lookups, `solunar_summary`, and `summarize_activity` twilight calculations. |
 | `SPYPOINT_TIMEOUT_SECONDS` | `30` | Per-request HTTP timeout in seconds (`1`–`120`, finite). |
 | `SPYPOINT_MAX_IMAGE_BYTES` | `10000000` | Maximum bytes per downloaded image (`1024`–`50000000`). |
 | `SPYPOINT_MAX_VIDEO_BYTES` | `100000000` | Maximum bytes per downloaded MP4 video (`1024`–`500000000`). |
@@ -402,7 +411,7 @@ uv run python scripts/check_dist.py
 uv run --no-project --with ./dist/spypoint_mcp-0.2.0-py3-none-any.whl python scripts/smoke.py
 ```
 
-- **Test Suite & Coverage**: **137 automated tests** pass with **91.06% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
+- **Test Suite & Coverage**: **144 automated tests** pass with **>91% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
 - **Project Documentation**:
   - [API_COMPATIBILITY.md](API_COMPATIBILITY.md) — Upstream SPYPOINT REST endpoints, payload contracts, and known limitations
   - [VERIFICATION.md](VERIFICATION.md) & [LIVE_VERIFICATION.json](LIVE_VERIFICATION.json) — Offline and live-account verification evidence

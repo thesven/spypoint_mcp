@@ -10,6 +10,12 @@
   restart/cancellation recovery, optimistic concurrency checks and verified file reuse.
 - Added contact sheets, bounded image resizing, timezone-aware activity summaries,
   reported fleet health, and CSV/JSON exports with integrity/coverage manifests.
+- Added ROI cropping (`crop_photo`), chronological motion burst strips (`create_burst_strip`),
+  solunar and twilight analytics (`solunar_summary`), telemetry health trends (`telemetry_trends`),
+  private field notes and tagging (`annotate_photo`), and high-water mark polling (`check_new_photos`).
+- Added environmental weather reanalysis via Open-Meteo (`get_photo_weather`, `sync_weather`, `weather_activity_summary`)
+  with local SQLite caching (`schema_version=4`), 16-point wind compass directions, 3-hour barometric
+  pressure trends ($\Delta P_{3h}$), and animal activity distributions across temperature bands and wind octants.
 - Added authenticated loopback HTTP, sync/catalog CLI commands and version reporting.
 - Added contract, persistence, security and transport tests plus package/CI guidance.
 - Live account verification found and fixed generic binary JPEG content-type handling;

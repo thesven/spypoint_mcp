@@ -5,6 +5,7 @@ import base64
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from functools import wraps
 from typing import Annotated, Literal
 
@@ -15,7 +16,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 
 from . import __version__
-from .analysis import fleet_health, summarize, timezone
+from .analysis import fleet_health, summarize, summarize_weather_activity, timezone
 from .analysis import solunar_summary as summarize_solunar
 from .client import SpypointClient
 from .config import Settings, SpypointError
@@ -35,13 +36,22 @@ from .schemas import (
     PhotoAnnotation,
     PhotoFilters,
     PhotoPage,
+    PhotoWeather,
     SolunarSummary,
     SyncJob,
     SyncJobs,
+    WeatherActivitySummary,
+    WeatherSyncResult,
 )
 from .service import PhotoService
 from .sync import SyncEngine
 from .visuals import resize
+from .weather import (
+    OpenMeteoClient,
+    calculate_pressure_trend,
+    normalize_hour_utc,
+    round_grid_coordinate,
+)
 
 Size = Literal["small", "medium", "large", "hd"]
 READ = ToolAnnotations(
@@ -83,13 +93,16 @@ def image_result(metadata: dict, images: list[tuple[dict, bytes, str]]) -> CallT
 
 
 def create_server(
-    settings: Settings | None = None, client: SpypointClient | None = None
+    settings: Settings | None = None,
+    client: SpypointClient | None = None,
+    weather_client: OpenMeteoClient | None = None,
 ) -> MCPServer:
     @asynccontextmanager
     async def lifespan(server: MCPServer) -> AsyncIterator[PhotoService]:
         api = client or SpypointClient(settings or Settings.load())
+        service = PhotoService(api, weather_client=weather_client)
         try:
-            yield PhotoService(api)
+            yield service
         finally:
             await api.close()
 
@@ -615,6 +628,119 @@ def create_server(
             await ctx.request_context.lifespan_context.check_new_photos(
                 camera_ids, watermark_key, limit, advance_watermark
             )
+        )
+
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def get_photo_weather(
+        photo_id: str,
+        ctx: Context,
+        camera_id: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> PhotoWeather:
+        """Retrieve accurate meteorological details and animal-tracking conditions for a photo.
+
+        Fetches ambient & apparent temperature, 3-hour barometric pressure trend, 16-point wind
+        compass, gusts, precipitation, cloud cover, and solunar correlation, cached in SQLite.
+        """
+        service = ctx.request_context.lifespan_context
+        report = await service.photo_weather(photo_id, camera_id, latitude, longitude)
+        return PhotoWeather.model_validate(report)
+
+    @server.tool(annotations=WRITE)
+    @safe_tool
+    async def sync_weather(
+        ctx: Context,
+        camera_ids: list[str] | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> WeatherSyncResult:
+        """Batch-download and cache hourly meteorological observations for cataloged photos.
+
+        Pre-populates the local SQLite weather cache over the bounding date range of indexed photos
+        so offline queries and activity summaries have instant weather data.
+        """
+        service = ctx.request_context.lifespan_context
+        result = await service.sync_weather(camera_ids, after, before, latitude, longitude)
+        return WeatherSyncResult.model_validate(result)
+
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def weather_activity_summary(
+        ctx: Context,
+        camera_ids: list[str] | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        tags: list[str] | None = None,
+        user_tags: list[str] | None = None,
+        favorites_only: bool = False,
+        has_video: bool | None = None,
+        timezone_name: str = "UTC",
+        latitude: float | None = None,
+        longitude: float | None = None,
+        reinterpret_utc_as_local: bool = False,
+        limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
+    ) -> WeatherActivitySummary:
+        """Analyze activity patterns correlated with temperature, pressure trend, and wind.
+
+        Aggregates photo counts across temperature bands, 3-hour barometric pressure trends,
+        cardinal wind directions (8-point octants), wind speed tiers, and weather conditions.
+        """
+        timezone(timezone_name)
+        service = ctx.request_context.lifespan_context
+        lat, lon = service._resolve_coordinates(latitude, longitude)
+        grid_lat = round_grid_coordinate(lat)
+        grid_lon = round_grid_coordinate(lon)
+        window = await service.catalog.window(
+            camera_ids, after, before, tags, limit, favorites_only, has_video, user_tags
+        )
+        photos = window["photos"]
+        hours = {
+            normalize_hour_utc(datetime.fromisoformat(p["date"].replace("Z", "+00:00")))
+            for p in photos
+            if p.get("date")
+        }
+        prior_hours = {
+            normalize_hour_utc(
+                datetime.fromisoformat(h.replace("Z", "+00:00")) - timedelta(hours=3)
+            )
+            for h in hours
+        }
+        all_hours = list(hours | prior_hours)
+        cached = await service.catalog.get_cached_weather(grid_lat, grid_lon, all_hours)
+
+        for h in hours:
+            if h in cached:
+                prior_h = normalize_hour_utc(
+                    datetime.fromisoformat(h.replace("Z", "+00:00")) - timedelta(hours=3)
+                )
+                prior_obs = cached.get(prior_h)
+                _, p_trend = calculate_pressure_trend(
+                    cached[h]["pressure_hpa"],
+                    prior_obs["pressure_hpa"] if prior_obs else None,
+                )
+                cached[h]["pressure_trend_3h"] = p_trend
+
+        result = await asyncio.to_thread(
+            summarize_weather_activity,
+            photos,
+            cached,
+            timezone_name,
+            window["truncated"],
+            lat,
+            lon,
+            reinterpret_utc_as_local,
+        )
+        return WeatherActivitySummary.model_validate(
+            {
+                **result,
+                "queried_at": window["queried_at"],
+                "after": window["after"],
+                "before": window["before"],
+            }
         )
 
     @server.tool(annotations=WRITE)

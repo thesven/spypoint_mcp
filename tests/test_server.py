@@ -45,6 +45,9 @@ async def test_mcp_discovery_validation_and_real_image_blocks(api, fake):
             "export_catalog",
             "annotate_photo",
             "check_new_photos",
+            "get_photo_weather",
+            "sync_weather",
+            "weather_activity_summary",
         }
         cameras = await mcp.call_tool("list_cameras", {})
         assert not cameras.is_error
@@ -91,6 +94,7 @@ async def test_camera_latest_and_download_through_mcp(api):
                     "export_catalog",
                     "annotate_photo",
                     "check_new_photos",
+                    "sync_weather",
                 }
             )
             assert "ctx" not in tool.input_schema["properties"]
@@ -188,7 +192,7 @@ async def test_stdio_subprocess_tools_list():
             if "id" in message:
                 response = json.loads(await asyncio.wait_for(proc.stdout.readline(), 10))
                 assert response["id"] == message["id"] and "error" not in response
-        assert len(response["result"]["tools"]) == 25
+        assert len(response["result"]["tools"]) == 28
     finally:
         proc.stdin.close()
         try:

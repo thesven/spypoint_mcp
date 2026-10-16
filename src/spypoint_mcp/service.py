@@ -4,20 +4,46 @@ import asyncio
 import hashlib
 import os
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from .analysis import telemetry_trends
+from .analysis import (
+    moon_phase,
+    solar_elevation,
+    sun_phase,
+    telemetry_trends,
+    validate_coordinates,
+)
 from .catalog import Catalog, now
 from .client import VIDEO_SIZES, SpypointClient, photo_summary
 from .config import SpypointError
 from .schemas import CameraInventory
+from .weather import (
+    OpenMeteoClient,
+    build_tracking_summary,
+    c_to_f,
+    calculate_pressure_trend,
+    degrees_to_compass_16,
+    hpa_to_inhg,
+    kmh_to_mph,
+    mm_to_inches,
+    normalize_hour_utc,
+    round_grid_coordinate,
+)
 
 
 class PhotoService:
-    def __init__(self, client: SpypointClient):
+    def __init__(self, client: SpypointClient, weather_client: OpenMeteoClient | None = None):
         self.client = client
         self._catalog: Catalog | None = None
+        self._weather = weather_client
+
+    @property
+    def weather_client(self) -> OpenMeteoClient:
+        if self._weather is None:
+            self._weather = OpenMeteoClient(timeout=self.client.settings.timeout)
+        return self._weather
 
     @property
     def catalog(self) -> Catalog:
@@ -159,6 +185,193 @@ class PhotoService:
             "camera_discovery_complete": page["camera_discovery_complete"],
             "warnings": page["warnings"],
             "note": "High-water mark advances to the newest observed photo capture date.",
+        }
+
+    def _resolve_coordinates(
+        self, latitude: float | None, longitude: float | None
+    ) -> tuple[float, float]:
+        coords = validate_coordinates(latitude, longitude)
+        if coords is not None:
+            return coords
+        if (
+            self.client.settings.default_latitude is not None
+            and self.client.settings.default_longitude is not None
+        ):
+            return (
+                self.client.settings.default_latitude,
+                self.client.settings.default_longitude,
+            )
+        raise SpypointError(
+            "GPS coordinates required. Provide latitude and longitude or configure "
+            "SPYPOINT_DEFAULT_LATITUDE and SPYPOINT_DEFAULT_LONGITUDE."
+        )
+
+    async def photo_weather(
+        self,
+        photo_id: str,
+        camera_id: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> dict:
+        photo = await self.catalog.get(photo_id)
+        if not photo:
+            try:
+                photo = self._normalized_summary(self.client.cached_photo(photo_id))
+            except SpypointError:
+                photo = await self.resolve_photo(photo_id, camera_id)
+        raw_date = photo.get("date")
+        if not raw_date:
+            raise SpypointError("Photo does not contain a capture date.")
+        lat, lon = self._resolve_coordinates(latitude, longitude)
+        grid_lat = round_grid_coordinate(lat)
+        grid_lon = round_grid_coordinate(lon)
+
+        dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+        hour_utc = normalize_hour_utc(dt)
+        prior_3h_utc = normalize_hour_utc(dt - timedelta(hours=3))
+
+        cached = await self.catalog.get_cached_weather(grid_lat, grid_lon, [hour_utc, prior_3h_utc])
+        was_cached = hour_utc in cached
+
+        if not was_cached or prior_3h_utc not in cached:
+            start_d = (dt - timedelta(days=1)).date()
+            end_d = (dt + timedelta(days=1)).date()
+            fetched = await self.weather_client.fetch_hourly_range(
+                grid_lat, grid_lon, start_d, end_d
+            )
+            await self.catalog.store_weather_observations(fetched)
+            cached = await self.catalog.get_cached_weather(
+                grid_lat, grid_lon, [hour_utc, prior_3h_utc]
+            )
+
+        if hour_utc not in cached:
+            raise SpypointError(f"No weather observations available for {hour_utc}.")
+
+        obs = cached[hour_utc]
+        prior_obs = cached.get(prior_3h_utc)
+        press_delta, press_trend = calculate_pressure_trend(
+            obs["pressure_hpa"], prior_obs["pressure_hpa"] if prior_obs else None
+        )
+
+        lunar = moon_phase(dt)
+        elev = solar_elevation(dt, grid_lat, grid_lon)
+        s_phase = sun_phase(elev)
+        summary = build_tracking_summary(
+            temp_c=obs["temperature_c"],
+            apparent_temp_c=obs["apparent_temperature_c"],
+            wind_speed_kmh=obs["wind_speed_kmh"],
+            wind_gusts_kmh=obs["wind_gusts_kmh"],
+            wind_dir_deg=obs["wind_direction_deg"],
+            pressure_hpa=obs["pressure_hpa"],
+            pressure_trend=press_trend,
+            pressure_delta=press_delta,
+            weather_desc=obs["weather_condition"],
+            humidity=obs["relative_humidity"],
+            dew_point_c=obs["dew_point_c"],
+        )
+
+        return {
+            "photo_id": photo["id"],
+            "camera_id": photo["camera_id"],
+            "captured_at": raw_date,
+            "hour_utc": hour_utc,
+            "grid_latitude": grid_lat,
+            "grid_longitude": grid_lon,
+            "temperature_c": obs["temperature_c"],
+            "temperature_f": c_to_f(obs["temperature_c"]),
+            "apparent_temperature_c": obs["apparent_temperature_c"],
+            "apparent_temperature_f": c_to_f(obs["apparent_temperature_c"]),
+            "relative_humidity": obs["relative_humidity"],
+            "dew_point_c": obs["dew_point_c"],
+            "dew_point_f": c_to_f(obs["dew_point_c"]),
+            "pressure_hpa": obs["pressure_hpa"],
+            "pressure_inhg": hpa_to_inhg(obs["pressure_hpa"]),
+            "pressure_trend_3h": press_trend,
+            "pressure_delta_3h_hpa": press_delta,
+            "wind_speed_kmh": obs["wind_speed_kmh"],
+            "wind_speed_mph": kmh_to_mph(obs["wind_speed_kmh"]),
+            "wind_direction_deg": obs["wind_direction_deg"],
+            "wind_compass": degrees_to_compass_16(obs["wind_direction_deg"]),
+            "wind_gusts_kmh": obs["wind_gusts_kmh"],
+            "wind_gusts_mph": kmh_to_mph(obs["wind_gusts_kmh"]),
+            "precipitation_mm": obs["precipitation_mm"],
+            "precipitation_inches": mm_to_inches(obs["precipitation_mm"]),
+            "snowfall_cm": obs["snowfall_cm"],
+            "cloud_cover_pct": obs["cloud_cover_pct"],
+            "weather_code": obs["weather_code"],
+            "weather_condition": obs["weather_condition"],
+            "weather_category": obs["weather_category"],
+            "moon_phase": lunar["phase"],
+            "moon_illumination_pct": lunar["illumination_percentage"],
+            "sun_phase": s_phase,
+            "tracking_summary": summary,
+            "cached": was_cached,
+            "scope": "local_catalog",
+        }
+
+    async def sync_weather(
+        self,
+        camera_ids: list[str] | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        latitude: float | None = None,
+        longitude: float | None = None,
+    ) -> dict:
+        lat, lon = self._resolve_coordinates(latitude, longitude)
+        grid_lat = round_grid_coordinate(lat)
+        grid_lon = round_grid_coordinate(lon)
+
+        window = await self.catalog.window(
+            camera_ids=camera_ids, after=after, before=before, limit=10000
+        )
+        photos = window["photos"]
+        if not photos:
+            return {
+                "camera_ids": camera_ids or [],
+                "hours_fetched": 0,
+                "observations_stored": 0,
+                "grid_latitude": grid_lat,
+                "grid_longitude": grid_lon,
+                "oldest_hour": None,
+                "newest_hour": None,
+                "scope": "local_catalog",
+                "note": "No indexed photos found matching the criteria.",
+            }
+
+        dates = [p["date"] for p in photos if p.get("date")]
+        if not dates:
+            return {
+                "camera_ids": camera_ids or [],
+                "hours_fetched": 0,
+                "observations_stored": 0,
+                "grid_latitude": grid_lat,
+                "grid_longitude": grid_lon,
+                "oldest_hour": None,
+                "newest_hour": None,
+                "scope": "local_catalog",
+                "note": "Indexed photos lacked valid capture dates.",
+            }
+
+        min_dt = datetime.fromisoformat(min(dates).replace("Z", "+00:00"))
+        max_dt = datetime.fromisoformat(max(dates).replace("Z", "+00:00"))
+        start_d = (min_dt - timedelta(days=1)).date()
+        end_d = (max_dt + timedelta(days=1)).date()
+
+        fetched = await self.weather_client.fetch_hourly_range(grid_lat, grid_lon, start_d, end_d)
+        stored_count = await self.catalog.store_weather_observations(fetched)
+        hours = [obs["hour_utc"] for obs in fetched]
+        cids = list({p["camera_id"] for p in photos})
+
+        return {
+            "camera_ids": cids,
+            "hours_fetched": len(fetched),
+            "observations_stored": stored_count,
+            "grid_latitude": grid_lat,
+            "grid_longitude": grid_lon,
+            "oldest_hour": min(hours) if hours else None,
+            "newest_hour": max(hours) if hours else None,
+            "scope": "local_catalog",
+            "note": "Weather observations successfully cached in local SQLite catalog.",
         }
 
     async def contact_sheet(
