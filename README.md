@@ -4,13 +4,13 @@
 ![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)
 ![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-informational)
 
-A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and CLI that connects vision-capable LLMs to your **SPYPOINT cellular trail camera fleet**. Discover owned and shared cameras, inspect actual trail camera images inline, build labeled contact sheets, download existing photos and MP4 videos with SHA-256 verification, maintain a resumable local SQLite archive, and analyze activity patterns across **19 MCP tools**, **2 resources**, and **2 guided prompts**.
+A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and CLI that connects vision-capable LLMs to your **SPYPOINT cellular trail camera fleet**. Discover owned and shared cameras, inspect and crop actual trail camera images inline, build labeled contact sheets and motion-burst strips, download existing photos and MP4 videos with SHA-256 verification, maintain a resumable local SQLite archive with private field notes and telemetry history, and analyze solunar, twilight, and activity patterns across **25 MCP tools**, **2 resources**, and **2 guided prompts**.
 
 > **Read-Only & Privacy-First by Design**
 > This server only reads from your SPYPOINT account. It **never** modifies camera settings, deletes cloud photos, triggers remote captures, or orders paid HD media. Account credentials and upstream signed S3/CloudFront URLs are kept strictly in process memory and are never exposed in tool arguments, tool outputs, or the local SQLite catalog.
 
 > **Compatibility Status (`v0.2.0`)**
-> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**127 tests, >90% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
+> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**137 tests, >91% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
 
 ---
 
@@ -32,12 +32,12 @@ A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) ser
 
 ## Key Capabilities
 
-- **Fleet Discovery & Telemetry Health**: Enumerate owned and shared cameras, inspect battery/signal/SD-card telemetry, and flag stale check-ins or low signal/memory thresholds without guessing unknown vendor units.
-- **Inline Visual Inspection & Contact Sheets**: Return actual JPEG/PNG/WebP images as MCP `ImageContent` blocks (`latest_photos`, `view_photo`) with optional bounded resizing (`max_edge`), or render concurrent, numbered 1–12 photo comparison grids (`create_contact_sheet`) with explicit error tiles.
+- **Fleet Discovery, Telemetry Health & Battery Trends**: Enumerate owned and shared cameras, inspect battery/signal/SD-card telemetry (`camera_health`), and persist historical telemetry snapshots (`telemetry_trends`) to compute linear battery discharge slopes (`%/day`) and estimated days until `20%` and `0%` battery.
+- **Inline Visual Inspection, ROI Zoom & Motion Burst Strips**: Return actual JPEG/PNG/WebP images as MCP `ImageContent` blocks (`latest_photos`, `view_photo`), crop and upscale normalized regions of interest (`crop_photo`) to inspect antlers, ear tags, or distant targets, build 1–12 photo comparison grids (`create_contact_sheet`), or auto-cluster chronological motion bursts into horizontal delta-labeled strips (`create_burst_strip`).
 - **Cold-Session Media Downloads**: Save existing `small`, `medium`, `large`, or `hd` photos (`download_photo`) and `sdVideo`, `hdVideo`, or `streamVideo` MP4 clips (`download_video`) to a dedicated local directory with atomic writes and SHA-256 integrity records.
-- **Account-Scoped Local SQLite Catalog (`schema_version=2`)**: Automatically indexes sanitized photo metadata and camera names (`cameras` table) isolated per credential namespace. Supports fast offline cursor-paginated queries (`search_catalog`) by camera, capture-time window, tags, favorites, and video availability (`has_video`).
-- **Durable, Resumable Bulk Sync**: Create checkpointed indexing or image-download jobs (`start_photo_sync`, `continue_photo_sync`) that advance fairly across cameras, survive process restarts, verify existing files by SHA-256 before reuse, and halt honestly on untraversable timestamp boundaries (`pagination_stalled`).
-- **Timezone-Aware Activity Analytics & Safe Exports**: Summarize photo counts by camera (including persisted `camera_name`), day, local hour, weekday, and tag in any IANA timezone (`summarize_activity`), automatically detect mislabeled wall-clock `Z` timestamps, and export bounded CSV/JSON snapshots with formula-injection protection and SHA-256 coverage manifests (`export_catalog`).
+- **Account-Scoped Local SQLite Catalog (`schema_version=3`) & Private Field Notes**: Automatically indexes sanitized photo metadata and camera names (`cameras` table) isolated per credential namespace. Attach private local field notes and normalized custom tags (`annotate_photo`) and query offline (`search_catalog`) by camera, capture-time window, upstream `tags`, private `user_tags`, favorites, and video availability (`has_video`).
+- **Durable Bulk Sync & Incremental High-Water Mark Polling**: Create checkpointed indexing or image-download jobs (`start_photo_sync`, `continue_photo_sync`) that survive process restarts, or run single-call incremental polling (`check_new_photos`) that tracks per-camera high-water marks in SQLite and returns only newly arrived photos since the last check.
+- **Timezone-Aware Solunar, Twilight & Activity Analytics**: Summarize photo counts by camera (`camera_name`), day, local hour, weekday, lunar phase (`by_moon_phase`), and solar twilight phase (`by_sun_phase`) in any IANA timezone (`summarize_activity`, `solunar_summary`), automatically detect mislabeled wall-clock `Z` timestamps, and export bounded CSV/JSON snapshots with formula-injection protection and SHA-256 coverage manifests (`export_catalog`).
 
 ---
 
@@ -131,13 +131,14 @@ For local MCP clients that connect over Streamable HTTP with a custom `Authoriza
 
 All structured tools validate their responses against strict Pydantic output schemas (`extra="forbid"`) and declare MCP `ToolAnnotations` distinguishing read-only queries from local filesystem/catalog writes.
 
-### 1. Fleet Discovery & Telemetry Health
+### 1. Fleet Discovery, Telemetry Health & Trends
 
 | Tool | Mode | Description |
 | --- | --- | --- |
-| `list_cameras` | Read | List owned and enabled shared cameras (`name_contains` optional filter), model, status/configuration summary, and explicit discovery warnings. Also updates cached camera names in the local catalog. |
-| `get_camera` | Read | Retrieve status and configuration telemetry (battery, signal, SD memory, firmware, last update) for one `camera_id`. |
-| `camera_health` | Read | Evaluate reported telemetry against configurable thresholds (`stale_hours=24`, `signal_threshold=20`, `memory_threshold=90`). Preserves unknown measurements honestly without live-pinging cameras. |
+| `list_cameras` | Read | List owned and enabled shared cameras (`name_contains` optional filter), model, status/configuration summary, and explicit discovery warnings. Updates cached camera names and telemetry snapshots in the local catalog. |
+| `get_camera` | Read | Retrieve status and configuration telemetry (battery, signal, SD memory, firmware, last update) for one `camera_id` and record a telemetry snapshot. |
+| `camera_health` | Read | Evaluate reported telemetry against configurable thresholds (`stale_hours=24`, `signal_threshold=20`, `memory_threshold=90`) and record telemetry snapshots. Preserves unknown measurements honestly without live-pinging cameras. |
+| `telemetry_trends` | Read | Analyze persisted camera telemetry history (`camera_ids`, `days` 1–365, `refresh_live=false`) to compute linear battery discharge slopes (`%/day`), estimated days until `20%` and `0%` battery, signal min/max/latest, and SD storage progression. |
 
 ### 2. Live Photo Discovery & Visual Inspection
 
@@ -148,7 +149,9 @@ All structured tools validate their responses against strict Pydantic output sch
 | `get_photo` | Read | Fetch an owned photo's detail metadata (`camera_id`, `photo_id`) and refresh its in-memory signed media URLs without re-listing. |
 | `latest_photos` | Read | Fetch the newest photo by capture time from up to 5 cameras per call (`offset`, `camera_limit`, `include_images=true`, `size="medium"`). Follow `next_offset` until `null` for complete fleet coverage. |
 | `view_photo` | Read | Return an actual image (`small`, `medium`, `large`, or `hd`) as an MCP `ImageContent` block. Supports `camera_id` fallback for cold sessions and optional `max_edge` (256–4096 px) JPEG resizing. |
+| `crop_photo` | Read | Crop a normalized bounding box (`x`, `y`, `width`, `height` in `0.0`–`1.0`) from a photo (`size="hd"` by default, `camera_id` fallback, `max_edge` 256–2048 px, `upscale=true`) and return a high-clarity zoomed JPEG `ImageContent` block alongside pixel coordinates. |
 | `create_contact_sheet` | Read | Concurrently fetch 1–12 distinct `photo_ids` and render a numbered comparison sheet (`columns` 1–4, `tile_width` 256–768 px, `size="large"`). Failed tiles are rendered and reported explicitly. |
+| `create_burst_strip` | Read | Render a chronological horizontal motion-burst strip from explicit `photo_ids` (1–8) or by auto-clustering photos stored in the local catalog within `burst_window_seconds` (5–600s, default 60s) of `anchor_photo_id`, labeling each frame with `+Xs` capture delta. |
 
 ### 3. Local Media Downloads
 
@@ -157,16 +160,18 @@ All structured tools validate their responses against strict Pydantic output sch
 | `download_photo` | Write | Save an existing image rendition (`size="large"` by default; accepts optional `camera_id` fallback after restart) to `SPYPOINT_DOWNLOAD_DIR` with SHA-256 verification. Never overwrites different existing files. |
 | `download_video` | Write | Save an existing MP4 rendition (`sdVideo`, `hdVideo`, or `streamVideo`; accepts optional `camera_id` fallback) up to `SPYPOINT_MAX_VIDEO_BYTES` with a SHA-256 record. Rejects HLS playlists and never orders paid media. |
 
-### 4. Local Catalog, Analytics & Exports
+### 4. Local Catalog, Field Notes, Analytics & Exports
 
 | Tool | Mode | Description |
 | --- | --- | --- |
-| `search_catalog` | Read | Offline, cursor-paginated search over locally indexed photos (`camera_ids`, `after`, `before`, `tags`, `favorites_only`, `has_video`, `limit` 1–500, `cursor`). All supplied tags must match. |
-| `catalog_status` | Read | Report local SQLite catalog totals (`photos`, `downloads`, `jobs`, `schema_version=2`) and per-camera coverage (`camera_id`, `camera_name`, `photos`, `oldest`, `newest`). |
-| `summarize_activity` | Read | Aggregate local catalog activity by camera (`camera_name` included), date, local hour, weekday, and tag in an IANA `timezone_name`. Supports `favorites_only`, `has_video`, and `reinterpret_utc_as_local` for cameras that stamp local wall-clock time with `Z`. |
-| `export_catalog` | Write | Export a bounded local catalog snapshot (`limit` up to 50,000; supports `favorites_only` and `has_video`) to UTF-8 CSV (with spreadsheet formula-injection escaping and `camera_name` column) or JSON alongside a `.manifest.json` SHA-256 record. |
+| `annotate_photo` | Write | Save or clear a private local field `note` (up to 2,000 chars) and/or custom `user_tags` (up to 20 tags) on an indexed `photo_id`. Never modifies upstream SPYPOINT account state. |
+| `search_catalog` | Read | Offline, cursor-paginated search over locally indexed photos (`camera_ids`, `after`, `before`, `tags`, `user_tags`, `favorites_only`, `has_video`, `limit` 1–500, `cursor`). All supplied tags must match. |
+| `catalog_status` | Read | Report local SQLite catalog totals (`photos`, `downloads`, `jobs`, `schema_version=3`) and per-camera coverage (`camera_id`, `camera_name`, `photos`, `oldest`, `newest`). |
+| `summarize_activity` | Read | Aggregate local catalog activity by camera (`camera_name` included), date, local hour, weekday, tag, lunar phase (`by_moon_phase`), and solar phase (`by_sun_phase` when coordinates are provided or configured). Supports `user_tags`, `favorites_only`, `has_video`, and `reinterpret_utc_as_local`. |
+| `solunar_summary` | Read | Compute a dedicated solunar and twilight activity breakdown (`by_moon_phase`, `by_sun_phase`, `by_camera`) over the local catalog using camera GPS coordinates (`latitude`, `longitude`, or `SPYPOINT_DEFAULT_LATITUDE`/`SPYPOINT_DEFAULT_LONGITUDE`). |
+| `export_catalog` | Write | Export a bounded local catalog snapshot (`limit` up to 50,000; supports `user_tags`, `favorites_only`, and `has_video`) to UTF-8 CSV (including `camera_name`, `user_note`, and `user_tags` columns with formula-injection escaping) or JSON alongside a `.manifest.json` SHA-256 record. |
 
-### 5. Resumable Sync Jobs
+### 5. Resumable Sync Jobs & Incremental Polling
 
 | Tool | Mode | Description |
 | --- | --- | --- |
@@ -174,6 +179,7 @@ All structured tools validate their responses against strict Pydantic output sch
 | `continue_photo_sync` | Write | Advance a sync job by `page_budget` (1–20 pages, default 1) fairly across cameras with transactional checkpoints and SHA-256 download deduplication. |
 | `get_sync_status` | Read | Inspect a sync job's durable per-camera checkpoints, counts, and errors offline. |
 | `list_sync_jobs` | Read | List recent sync jobs (`limit` 1–100) for the active credential namespace so interrupted archives can be resumed. |
+| `check_new_photos` | Write | Poll selected cameras (`camera_ids`, `max_pages_per_camera` 1–5, `include_images=false`, `size="medium"`) for photos newer than each camera's persisted SQLite high-water mark, indexing and returning only newly arrived photos. |
 
 ### MCP Resources & Prompts
 
@@ -346,6 +352,8 @@ Configuration is loaded **only** from an explicitly provided `--env-file` and/or
 | `SPYPOINT_INCLUDE_SHARED` | `true` | Include shared cameras (`true` or `false`). |
 | `SPYPOINT_CAMERA_TIMEZONE` | *(unset)* | IANA timezone (e.g., `America/Toronto`) for naive or `wall_clock_z` camera timestamps. |
 | `SPYPOINT_CAMERA_TIME_MODE` | `strict` | Timestamp mode: `strict` (trust upstream offsets) or `wall_clock_z` (reinterpret `Z` as `SPYPOINT_CAMERA_TIMEZONE`). |
+| `SPYPOINT_DEFAULT_LATITUDE` | *(unset)* | Optional default latitude (`-90.0` to `90.0`) for `solunar_summary` and `summarize_activity` twilight calculations. |
+| `SPYPOINT_DEFAULT_LONGITUDE` | *(unset)* | Optional default longitude (`-180.0` to `180.0`) for `solunar_summary` and `summarize_activity` twilight calculations. |
 | `SPYPOINT_TIMEOUT_SECONDS` | `30` | Per-request HTTP timeout in seconds (`1`–`120`, finite). |
 | `SPYPOINT_MAX_IMAGE_BYTES` | `10000000` | Maximum bytes per downloaded image (`1024`–`50000000`). |
 | `SPYPOINT_MAX_VIDEO_BYTES` | `100000000` | Maximum bytes per downloaded MP4 video (`1024`–`500000000`). |
@@ -394,7 +402,7 @@ uv run python scripts/check_dist.py
 uv run --no-project --with ./dist/spypoint_mcp-0.2.0-py3-none-any.whl python scripts/smoke.py
 ```
 
-- **Test Suite & Coverage**: **127 automated tests** pass with **90.34% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
+- **Test Suite & Coverage**: **137 automated tests** pass with **91.06% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
 - **Project Documentation**:
   - [API_COMPATIBILITY.md](API_COMPATIBILITY.md) — Upstream SPYPOINT REST endpoints, payload contracts, and known limitations
   - [VERIFICATION.md](VERIFICATION.md) & [LIVE_VERIFICATION.json](LIVE_VERIFICATION.json) — Offline and live-account verification evidence

@@ -25,6 +25,8 @@ async def test_mcp_discovery_validation_and_real_image_blocks(api, fake):
             "list_photos",
             "latest_photos",
             "view_photo",
+            "crop_photo",
+            "create_burst_strip",
             "download_photo",
             "download_video",
             "list_photo_tags",
@@ -36,9 +38,13 @@ async def test_mcp_discovery_validation_and_real_image_blocks(api, fake):
             "get_sync_status",
             "list_sync_jobs",
             "camera_health",
+            "telemetry_trends",
             "summarize_activity",
+            "solunar_summary",
             "create_contact_sheet",
             "export_catalog",
+            "annotate_photo",
+            "check_new_photos",
         }
         cameras = await mcp.call_tool("list_cameras", {})
         assert not cameras.is_error
@@ -83,6 +89,8 @@ async def test_camera_latest_and_download_through_mcp(api):
                     "start_photo_sync",
                     "continue_photo_sync",
                     "export_catalog",
+                    "annotate_photo",
+                    "check_new_photos",
                 }
             )
             assert "ctx" not in tool.input_schema["properties"]
@@ -180,7 +188,7 @@ async def test_stdio_subprocess_tools_list():
             if "id" in message:
                 response = json.loads(await asyncio.wait_for(proc.stdout.readline(), 10))
                 assert response["id"] == message["id"] and "error" not in response
-        assert len(response["result"]["tools"]) == 19
+        assert len(response["result"]["tools"]) == 25
     finally:
         proc.stdin.close()
         try:

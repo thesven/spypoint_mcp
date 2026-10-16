@@ -206,7 +206,7 @@ async def test_catalog_v1_migration_future_version_rejection_and_video_filter(ap
     service = PhotoService(api)
     await service.list_photos()
     status = await service.catalog.summary()
-    assert status["schema_version"] == 2
+    assert status["schema_version"] == 3
     assert status["cameras"][0]["camera_name"] == "Field"
 
     raw_video = photo("p_vid", "c1", "2026-09-21T12:00:00.000Z")
@@ -221,7 +221,7 @@ async def test_catalog_v1_migration_future_version_rejection_and_video_filter(ap
         db.execute("DROP TABLE cameras")
         db.execute("PRAGMA user_version=1")
     migrated = await service.catalog.summary()
-    assert migrated["schema_version"] == 2 and migrated["photos"] == 2
+    assert migrated["schema_version"] == 3 and migrated["photos"] == 2
 
     with closing(sqlite3.connect(service.catalog.path)) as db, db:
         db.execute("PRAGMA user_version=99")

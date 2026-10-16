@@ -5,8 +5,10 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
+from typing import Literal
 
-from .catalog import Catalog
+from .analysis import telemetry_trends
+from .catalog import Catalog, now
 from .client import VIDEO_SIZES, SpypointClient, photo_summary
 from .config import SpypointError
 from .schemas import CameraInventory
@@ -58,6 +60,106 @@ class PhotoService:
                     "Unknown photo reference. Call list_photos or supply camera_id."
                 ) from None
             return await self.photo_detail(selected, photo_id)
+
+    async def crop_photo(
+        self,
+        photo_id: str,
+        box: tuple[float, float, float, float],
+        size: str = "large",
+        camera_id: str | None = None,
+        max_edge: int = 1600,
+    ) -> tuple[bytes, dict]:
+        from .visuals import crop
+
+        photo = await self.resolve_photo(photo_id, camera_id)
+        data, _ = await self.client.image(photo_id, size)
+        cropped, transformation = await asyncio.to_thread(crop, data, box, max_edge)
+        return cropped, {"photo": photo, "size": size, "transformation": transformation}
+
+    async def burst_strip(
+        self,
+        photo_ids: list[str],
+        direction: Literal["horizontal", "vertical"] = "horizontal",
+        tile_height: int = 360,
+        size: str = "large",
+    ) -> tuple[bytes, dict]:
+        from .visuals import burst_strip
+
+        if not 2 <= len(photo_ids) <= 8 or len(set(photo_ids)) != len(photo_ids):
+            raise SpypointError("Select 2–8 distinct photo IDs for a burst strip.")
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch_tile(photo_id: str) -> tuple[dict, bytes | None]:
+            metadata = {"photo_id": photo_id}
+            async with semaphore:
+                try:
+                    photo = await self.resolve_photo(photo_id)
+                    metadata.update(camera_id=photo["camera_id"], date=photo["date"])
+                    data, _ = await self.client.image(photo_id, size)
+                    return (metadata, data)
+                except SpypointError as exc:
+                    return ({**metadata, "error": str(exc)}, None)
+
+        tiles = list(await asyncio.gather(*(fetch_tile(pid) for pid in photo_ids)))
+        ordered = sorted(
+            enumerate(tiles),
+            key=lambda item: (str(item[1][0].get("date") or "9999"), item[0]),
+        )
+        return await asyncio.to_thread(burst_strip, [t for _, t in ordered], direction, tile_height)
+
+    async def annotate_photo(
+        self,
+        photo_id: str,
+        note: str | None = None,
+        user_tags: list[str] | None = None,
+    ) -> dict:
+        if note is None and user_tags is None:
+            return await self.catalog.get_annotation(photo_id)
+        return await self.catalog.annotate(photo_id, note, user_tags)
+
+    async def telemetry_trends(
+        self,
+        camera_ids: list[str] | None = None,
+        critical_battery_threshold: float = 15.0,
+        refresh_live: bool = True,
+    ) -> dict:
+        if refresh_live:
+            await self.cameras()
+        history = await self.catalog.telemetry_history(camera_ids)
+        return telemetry_trends(
+            history["records_by_camera"],
+            history["camera_names"],
+            critical_battery_threshold,
+        )
+
+    async def check_new_photos(
+        self,
+        camera_ids: list[str] | None = None,
+        watermark_key: str = "default",
+        limit: int = 50,
+        advance_watermark: bool = True,
+    ) -> dict:
+        wm_record = await self.catalog.get_watermark(watermark_key)
+        prev_wm = wm_record["watermark"] if wm_record else None
+        page = await self.list_photos(camera_ids, limit=limit, after=prev_wm)
+        new_photos = [
+            p for p in page["photos"] if prev_wm is None or (p.get("date") and p["date"] > prev_wm)
+        ]
+        dated = [p["date"] for p in new_photos if p.get("date")]
+        new_wm = max(dated) if dated else (prev_wm or now())
+        if advance_watermark:
+            await self.catalog.set_watermark(watermark_key, new_wm)
+        return {
+            "watermark_key": watermark_key,
+            "previous_watermark": prev_wm,
+            "new_watermark": new_wm,
+            "new_photos_count": len(new_photos),
+            "photos": new_photos,
+            "camera_ids": page["camera_ids"],
+            "camera_discovery_complete": page["camera_discovery_complete"],
+            "warnings": page["warnings"],
+            "note": "High-water mark advances to the newest observed photo capture date.",
+        }
 
     async def contact_sheet(
         self, photo_ids: list[str], columns: int = 3, tile_width: int = 480, size: str = "large"

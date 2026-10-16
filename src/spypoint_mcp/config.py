@@ -29,6 +29,8 @@ class Settings:
     state_dir: Path | None = None
     http_token: str = field(default="", repr=False)
     max_video_bytes: int = 100_000_000
+    default_latitude: float | None = None
+    default_longitude: float | None = None
 
     @classmethod
     def load(cls, env_file: Path | None = None) -> "Settings":
@@ -64,12 +66,27 @@ class Settings:
         state_dir = Path(get("STATE_DIR", ".spypoint-state")).expanduser()
         if shared not in {"true", "false"}:
             raise SpypointError("SPYPOINT_INCLUDE_SHARED must be true or false.")
+        raw_lat, raw_lon = get("DEFAULT_LATITUDE").strip(), get("DEFAULT_LONGITUDE").strip()
+        if bool(raw_lat) != bool(raw_lon):
+            raise SpypointError(
+                "Provide both SPYPOINT_DEFAULT_LATITUDE and SPYPOINT_DEFAULT_LONGITUDE or neither."
+            )
         try:
             timeout = float(get("TIMEOUT_SECONDS", "30"))
             max_bytes = int(get("MAX_IMAGE_BYTES", "10000000"))
             max_video_bytes = int(get("MAX_VIDEO_BYTES", "100000000"))
+            default_lat = float(raw_lat) if raw_lat else None
+            default_lon = float(raw_lon) if raw_lon else None
         except ValueError:
             raise SpypointError("Invalid numeric SPYPOINT configuration.") from None
+        if default_lat is not None and default_lon is not None:
+            if (
+                not math.isfinite(default_lat)
+                or not math.isfinite(default_lon)
+                or not -90 <= default_lat <= 90
+                or not -180 <= default_lon <= 180
+            ):
+                raise SpypointError("Default latitude must be -90..90 and longitude -180..180.")
         if (
             not math.isfinite(timeout)
             or not 1 <= timeout <= 120
@@ -94,6 +111,8 @@ class Settings:
             state_dir=(root / state_dir).resolve(),
             http_token=get("MCP_HTTP_TOKEN"),
             max_video_bytes=max_video_bytes,
+            default_latitude=default_lat,
+            default_longitude=default_lon,
         )
 
     def require_credentials(self) -> None:
