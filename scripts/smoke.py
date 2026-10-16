@@ -47,9 +47,9 @@ async def main():
                 if "id" in message:
                     response = json.loads(await asyncio.wait_for(process.stdout.readline(), 10))
                     assert response["id"] == message["id"] and "error" not in response
-            assert len(response["result"]["tools"]) == 25
+            assert len(response["result"]["tools"]) == 28
             print(
-                f"Installed wheel {spypoint_mcp.__version__}: stdio initialize and 25 tools passed"
+                f"Installed wheel {spypoint_mcp.__version__}: stdio initialize and 28 tools passed"
             )
         finally:
             process.stdin.close()

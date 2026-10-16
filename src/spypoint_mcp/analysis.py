@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import SpypointError
+from .weather import degrees_to_compass_8
 
 SYNODIC_MONTH = 29.530588853
 LUNAR_EPOCH = datetime(2000, 1, 6, 18, 14, 0, tzinfo=UTC)
@@ -26,6 +27,32 @@ SUN_PHASES = (
     "nautical_twilight",
     "astronomical_twilight",
     "night",
+)
+TEMPERATURE_BANDS = (
+    "below_freezing",
+    "cold_32_45",
+    "mild_45_60",
+    "warm_60_75",
+    "hot_above_75",
+)
+PRESSURE_TRENDS = (
+    "rapidly_falling",
+    "falling",
+    "steady",
+    "rising",
+    "rapidly_rising",
+)
+WIND_OCTANTS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+WIND_SPEED_TIERS = ("calm", "light", "moderate", "high")
+WEATHER_CATEGORIES = (
+    "clear",
+    "partly_cloudy",
+    "overcast",
+    "fog",
+    "drizzle",
+    "rain",
+    "snow",
+    "thunderstorm",
 )
 
 
@@ -538,4 +565,94 @@ def fleet_health(
         },
         "note": "Health is based on last reported telemetry, not a live ping. "
         "Battery values are preserved as reported; unknown units are not interpreted.",
+    }
+
+
+def categorize_temperature(temp_c: float) -> str:
+    temp_f = temp_c * 1.8 + 32.0
+    if temp_f < 32.0:
+        return "below_freezing"
+    if temp_f < 45.0:
+        return "cold_32_45"
+    if temp_f < 60.0:
+        return "mild_45_60"
+    if temp_f < 75.0:
+        return "warm_60_75"
+    return "hot_above_75"
+
+
+def categorize_wind_speed(wind_speed_kmh: float) -> str:
+    mph = wind_speed_kmh * 0.621371
+    if mph < 5.0:
+        return "calm"
+    if mph < 10.0:
+        return "light"
+    if mph < 18.0:
+        return "moderate"
+    return "high"
+
+
+def summarize_weather_activity(
+    photos: list[dict],
+    weather_by_hour: dict[str, dict],
+    timezone_name: str,
+    truncated: bool,
+    latitude: float | None = None,
+    longitude: float | None = None,
+    reinterpret_utc_as_local: bool = False,
+) -> dict:
+    zone = timezone(timezone_name)
+    coords = validate_coordinates(latitude, longitude)
+    temp_counts = Counter()
+    pressure_counts = Counter()
+    wind_dir_counts = Counter()
+    wind_spd_counts = Counter()
+    weather_cond_counts = Counter()
+    moon_counts = Counter()
+    sun_counts = Counter()
+
+    matched = 0
+    for photo in photos:
+        dt = _photo_local_dt(photo, zone, reinterpret_utc_as_local)
+        lunar = moon_phase(dt)
+        moon_counts[lunar["phase"]] += 1
+        if coords is not None:
+            s_phase = sun_phase(solar_elevation(dt, coords[0], coords[1]))
+            sun_counts[s_phase] += 1
+
+        dt_utc = dt.astimezone(UTC)
+        hour_key = dt_utc.strftime("%Y-%m-%dT%H:00:00Z")
+        obs = weather_by_hour.get(hour_key)
+        if obs is not None:
+            matched += 1
+            temp_band = categorize_temperature(obs["temperature_c"])
+            temp_counts[temp_band] += 1
+            if "pressure_trend_3h" in obs:
+                pressure_counts[obs["pressure_trend_3h"]] += 1
+            octant = degrees_to_compass_8(obs["wind_direction_deg"])
+            wind_dir_counts[octant] += 1
+            spd_tier = categorize_wind_speed(obs["wind_speed_kmh"])
+            wind_spd_counts[spd_tier] += 1
+            cond_cat = obs.get("weather_category", "clear")
+            weather_cond_counts[cond_cat] += 1
+
+    return {
+        "scope": "local_catalog",
+        "photo_count": len(photos),
+        "photos_with_weather": matched,
+        "truncated": truncated,
+        "timezone": timezone_name,
+        "by_temperature_band": {b: temp_counts[b] for b in TEMPERATURE_BANDS},
+        "by_pressure_trend": {p: pressure_counts[p] for p in PRESSURE_TRENDS},
+        "by_wind_direction": {w: wind_dir_counts[w] for w in WIND_OCTANTS},
+        "by_wind_speed_tier": {s: wind_spd_counts[s] for s in WIND_SPEED_TIERS},
+        "by_weather_condition": {c: weather_cond_counts[c] for c in WEATHER_CATEGORIES},
+        "by_moon_phase": {m: moon_counts[m] for m in MOON_PHASES},
+        "by_sun_phase": {s: sun_counts[s] for s in SUN_PHASES} if coords is not None else {},
+        "interpretation": (
+            "Counts describe indexed photographs during specified weather conditions. "
+            "Falling pressure (< -0.5 hPa/3h) and light-to-moderate wind often correlate "
+            "with increased daylight movement. "
+            "Counts represent photographs, not unique animal visits."
+        ),
     }

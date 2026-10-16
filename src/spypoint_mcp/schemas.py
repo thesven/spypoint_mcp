@@ -94,6 +94,7 @@ class CatalogStatus(Output):
     photos: int
     downloads: int
     jobs: int
+    weather_observations: int = 0
     cameras: list[CameraCoverage]
     scope: Literal["local_catalog"]
     schema_version: int
@@ -279,3 +280,74 @@ class IncrementalPollResult(Output):
     camera_discovery_complete: bool
     warnings: list[str]
     note: str
+
+
+class PhotoWeather(Output):
+    photo_id: str
+    camera_id: str
+    captured_at: str
+    hour_utc: str
+    grid_latitude: float
+    grid_longitude: float
+    temperature_c: float
+    temperature_f: float
+    apparent_temperature_c: float
+    apparent_temperature_f: float
+    relative_humidity: float
+    dew_point_c: float
+    dew_point_f: float
+    pressure_hpa: float
+    pressure_inhg: float
+    pressure_trend_3h: str
+    pressure_delta_3h_hpa: float | None = None
+    wind_speed_kmh: float
+    wind_speed_mph: float
+    wind_direction_deg: float
+    wind_compass: str
+    wind_gusts_kmh: float
+    wind_gusts_mph: float
+    precipitation_mm: float
+    precipitation_inches: float
+    snowfall_cm: float
+    cloud_cover_pct: float
+    weather_code: int
+    weather_condition: str
+    weather_category: str
+    moon_phase: str | None = None
+    moon_illumination_pct: float | None = None
+    sun_phase: str | None = None
+    tracking_summary: str
+    cached: bool
+    scope: Literal["local_catalog"] = "local_catalog"
+
+
+class WeatherSyncResult(Output):
+    camera_ids: list[str]
+    hours_fetched: int
+    observations_stored: int
+    grid_latitude: float
+    grid_longitude: float
+    oldest_hour: str | None = None
+    newest_hour: str | None = None
+    scope: Literal["local_catalog"]
+    note: str
+    truncated: bool = False
+
+
+class WeatherActivitySummary(Output):
+    scope: Literal["local_catalog"]
+    photo_count: int
+    photos_with_weather: int
+    truncated: bool
+    timezone: str
+    by_temperature_band: dict[str, int]
+    by_pressure_trend: dict[str, int]
+    by_wind_direction: dict[str, int]
+    by_wind_speed_tier: dict[str, int]
+    by_weather_condition: dict[str, int]
+    by_moon_phase: dict[str, int]
+    by_sun_phase: dict[str, int]
+    interpretation: str
+    queried_at: str
+    after: str | None = None
+    before: str | None = None
