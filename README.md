@@ -1,156 +1,206 @@
-# SPYPOINT MCP
+# SPYPOINT MCP Server
 
-Connect a vision-capable LLM to your SPYPOINT camera fleet. Discover owned and shared
-cameras, inspect actual images, download existing photos/videos, build resumable local
-archives, compare contact sheets, and analyze indexed activity with **19 MCP tools**.
+[![Validate CI](https://github.com/thesven/spypoint_mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/thesven/spypoint_mcp/actions/workflows/ci.yml)
+![Python 3.11–3.14](https://img.shields.io/badge/python-3.11%E2%80%933.14-blue)
+![Version 0.2.0](https://img.shields.io/badge/version-0.2.0-informational)
 
-**Version 0.2.0 — local release candidate.** Automated protocol, security, persistence,
-and media tests pass. Live authentication, one owned camera, actual images, exports,
-and restart/resume have now been verified; shared cameras and video remain unverified live.
-This is an unofficial integration based on the current public SPYPOINT web client and
-community adapters. See [API compatibility](API_COMPATIBILITY.md) and
-[release evidence](VERIFICATION.md) for the exact scope of testing.
+A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server and CLI that connects vision-capable LLMs to your **SPYPOINT cellular trail camera fleet**. Discover owned and shared cameras, inspect actual trail camera images inline, build labeled contact sheets, download existing photos and MP4 videos with SHA-256 verification, maintain a resumable local SQLite archive, and analyze activity patterns across **19 MCP tools**, **2 resources**, and **2 guided prompts**.
 
-The server reads your SPYPOINT account. It never changes camera settings, deletes
-account photos, triggers captures, or orders paid HD media. Downloads, indexing jobs,
-and exports write to your local computer. One process serves one configured account.
+> **Read-Only & Privacy-First by Design**
+> This server only reads from your SPYPOINT account. It **never** modifies camera settings, deletes cloud photos, triggers remote captures, or orders paid HD media. Account credentials and upstream signed S3/CloudFront URLs are kept strictly in process memory and are never exposed in tool arguments, tool outputs, or the local SQLite catalog.
 
-## Contents
+> **Compatibility Status (`v0.2.0`)**
+> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**127 tests, >90% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
 
-- [Get started](#get-started)
-- [Connect your LLM](#connect-your-llm)
-- [Tools](#tools)
-- [Workflow examples](#workflow-examples)
-- [Archive and resume](#archive-and-resume)
-- [CLI reference](#cli-reference)
-- [Dates, references, and coverage](#dates-references-and-coverage)
-- [Configuration and privacy](#configuration-and-privacy)
+---
+
+## Table of Contents
+
+- [Key Capabilities](#key-capabilities)
+- [Quick Start](#quick-start)
+- [Connect Your MCP Client](#connect-your-mcp-client)
+- [MCP Tools, Resources, and Prompts](#mcp-tools-resources-and-prompts)
+- [Workflow Examples](#workflow-examples)
+- [Resumable Archiving and Sync](#resumable-archiving-and-sync)
+- [CLI Reference](#cli-reference)
+- [Timestamps, Media References, and Coverage Semantics](#timestamps-media-references-and-coverage-semantics)
+- [Configuration and Security](#configuration-and-security)
 - [Troubleshooting](#troubleshooting)
-- [Development and verification](#development-and-verification)
+- [Development and Verification](#development-and-verification)
 
-## Get started
+---
 
-You need a SPYPOINT account with access to a camera, Python 3.11 or newer,
-[uv](https://docs.astral.sh/uv/), and an MCP-compatible client. Visual inspection also
-requires a vision-capable model. Internet access is needed for account/media requests;
-searching an existing local catalog does not contact SPYPOINT.
+## Key Capabilities
 
-This project is delivered as source and a local wheel; it has not been published to
-PyPI. Clone the repository and run these commands from its root (or use the extracted source
-directory containing `pyproject.toml` and `uv.lock`):
+- **Fleet Discovery & Telemetry Health**: Enumerate owned and shared cameras, inspect battery/signal/SD-card telemetry, and flag stale check-ins or low signal/memory thresholds without guessing unknown vendor units.
+- **Inline Visual Inspection & Contact Sheets**: Return actual JPEG/PNG/WebP images as MCP `ImageContent` blocks (`latest_photos`, `view_photo`) with optional bounded resizing (`max_edge`), or render concurrent, numbered 1–12 photo comparison grids (`create_contact_sheet`) with explicit error tiles.
+- **Cold-Session Media Downloads**: Save existing `small`, `medium`, `large`, or `hd` photos (`download_photo`) and `sdVideo`, `hdVideo`, or `streamVideo` MP4 clips (`download_video`) to a dedicated local directory with atomic writes and SHA-256 integrity records.
+- **Account-Scoped Local SQLite Catalog (`schema_version=2`)**: Automatically indexes sanitized photo metadata and camera names (`cameras` table) isolated per credential namespace. Supports fast offline cursor-paginated queries (`search_catalog`) by camera, capture-time window, tags, favorites, and video availability (`has_video`).
+- **Durable, Resumable Bulk Sync**: Create checkpointed indexing or image-download jobs (`start_photo_sync`, `continue_photo_sync`) that advance fairly across cameras, survive process restarts, verify existing files by SHA-256 before reuse, and halt honestly on untraversable timestamp boundaries (`pagination_stalled`).
+- **Timezone-Aware Activity Analytics & Safe Exports**: Summarize photo counts by camera (including persisted `camera_name`), day, local hour, weekday, and tag in any IANA timezone (`summarize_activity`), automatically detect mislabeled wall-clock `Z` timestamps, and export bounded CSV/JSON snapshots with formula-injection protection and SHA-256 coverage manifests (`export_catalog`).
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- A **SPYPOINT account** with at least one accessible camera
+- **Python 3.11 or newer** and [**uv**](https://docs.astral.sh/uv/)
+- An **MCP-compatible client** (e.g., Claude Desktop, Codex CLI, Cursor, Windsurf). Visual inspection requires a vision-capable model.
+
+### Installation & Setup
+
+Clone the repository and run the interactive setup from the project root:
 
 ```sh
 git clone https://github.com/thesven/spypoint_mcp.git
 cd spypoint_mcp
 uv sync --locked
+
+# 1. Create a local owner-only .env file (prompts for username & hidden password)
 uv run spypoint-mcp configure --env-file .env
+
+# 2. Verify authentication, camera discovery, and live image retrieval
 uv run spypoint-mcp doctor --env-file .env --check-images
+
+# 3. Print the ready-to-merge MCP client JSON configuration
 uv run spypoint-mcp client-config --env-file .env
 ```
 
-A successful doctor report has `authenticated: true`, `camera_discovery_complete: true`,
-and `status: "ok"` for each camera with an accessible photo. `no_photos` is a valid empty
-camera result. Review warnings and errors before relying on fleet coverage. Once connected,
-ask your client to list cameras and show the latest image from each one.
+### What the Setup Commands Do
 
-The examples use a POSIX shell (macOS/Linux). Automated local checks cover macOS ARM64
-with Python 3.11, 3.12, and 3.14. Hosted Linux CI passes on Python 3.11–3.14;
-Windows has not been validated. See [verification evidence](VERIFICATION.md).
+1. **`configure`**: Prompts for your SPYPOINT email/username and hidden password, creating `.env` with `0600` (owner-only) permissions on macOS/Linux. It refuses to overwrite an existing file. Keep credentials local—never paste them into chat or MCP tool arguments.
+2. **`doctor --check-images`**: Authenticates against SPYPOINT, discovers accessible cameras, and fetches the newest small image by capture time from each camera into memory (saving no files). A healthy report prints `authenticated: true`, `camera_discovery_complete: true`, and `status: "ok"` (or `no_photos` for empty cameras). Failed discovery or image retrieval exits with code `1`. Review the output before sharing, as it includes camera IDs.
+3. **`client-config`**: Outputs the `mcpServers` JSON snippet using absolute paths to your virtual environment's Python interpreter and `.env` file, without embedding any secrets.
 
-`configure` asks for your username and a hidden password. It creates a plaintext `.env`
-with owner-only permissions on macOS/Linux and refuses to overwrite an existing file.
-Keep credentials local; never paste them into chat or MCP tool arguments.
+> **Authentication Note**: Password authentication automatically performs one token refresh if a bearer token expires mid-session. You can alternatively supply a pre-existing `SPYPOINT_TOKEN` in `.env`, though static tokens cannot self-refresh. Interactive MFA, CAPTCHA, and federated OAuth logins are not supported.
 
-`doctor --check-images` authenticates, discovers cameras, and fetches the newest
-small image by capture time from each camera into memory. It prints counts and errors,
-without tokens, passwords, signed URLs, or image bytes. It saves no photos. Empty cameras
-are explicit; failed discovery/retrieval returns exit code 1. Camera IDs remain in the
-report, so review it before sharing.
+---
 
-A preexisting `SPYPOINT_TOKEN` can replace username/password, but cannot refresh itself.
-Password authentication permits one refresh after an expired-token response. Interactive
-MFA, CAPTCHA, and federated login are not implemented.
+## Connect Your MCP Client
 
-## Connect your LLM
+### Standard `mcpServers` JSON (Claude Desktop, Cursor, etc.)
 
-Merge the generated `spypoint` entry from `client-config` into your MCP client's existing
-`mcpServers` JSON configuration. It uses absolute interpreter and credential-file paths,
-and contains no secrets. Regenerate it after moving the project or rebuilding its venv.
-[Example JSON](examples/mcp-config.json) shows the shape.
+Merge the `spypoint` entry printed by `uv run spypoint-mcp client-config --env-file .env` into your MCP client's configuration file (see [examples/mcp-config.json](examples/mcp-config.json)):
 
-For Codex, after setup:
+```json
+{
+  "mcpServers": {
+    "spypoint": {
+      "command": "/absolute/path/to/spypoint_mcp/.venv/bin/python",
+      "args": [
+        "-m",
+        "spypoint_mcp",
+        "serve",
+        "--env-file",
+        "/absolute/path/to/spypoint_mcp/.env"
+      ]
+    }
+  }
+}
+```
+
+### OpenAI Codex CLI
+
+Register the server directly with the Codex CLI (see [examples/codex-config.toml](examples/codex-config.toml)):
 
 ```sh
 codex mcp add spypoint -- "$PWD/.venv/bin/python" -m spypoint_mcp serve --env-file "$PWD/.env"
 codex mcp list
 ```
 
-See [example TOML](examples/codex-config.toml) and the
-[official Codex MCP documentation](https://developers.openai.com/codex/mcp).
-Client configuration is not modified automatically. Stdio is the default: the client
-starts and stops this process. A manually started `serve` waits silently for protocol input.
-Reload or restart your MCP client after adding the entry, then check that `list_cameras`
-is discoverable. Saved files are on the server computer; a client on another machine
-does not automatically receive files referenced by local paths.
+After updating your client configuration, restart or reload the client and verify that `list_cameras` is available. By default, `serve` uses **stdio** transport and is started/stopped automatically by the MCP client.
 
-### Optional loopback HTTP
+### Optional Loopback HTTP Transport
 
-Use HTTP only with a client that supports a custom bearer header:
+For local MCP clients that connect over Streamable HTTP with a custom `Authorization` header:
 
-1. Set a random, independent `SPYPOINT_MCP_HTTP_TOKEN` of at least 32 non-whitespace ASCII
-   characters in your private environment file. Do not reuse your SPYPOINT account token.
-2. Run `uv run spypoint-mcp serve --env-file .env --transport streamable-http --port 8000`.
-3. Connect to `http://127.0.0.1:8000/mcp` with `Authorization: Bearer <your-local-token>`.
+1. Generate an independent random secret of **at least 32 non-whitespace ASCII characters** and set `SPYPOINT_MCP_HTTP_TOKEN` in your `.env` file. Do **not** reuse your SPYPOINT account token.
+2. Start the server on loopback:
+   ```sh
+   uv run spypoint-mcp serve --env-file .env --transport streamable-http --port 8000
+   ```
+3. Point your client to `http://127.0.0.1:8000/mcp` with header `Authorization: Bearer <SPYPOINT_MCP_HTTP_TOKEN>`.
 
-HTTP binds only to loopback, requires authentication, and retains the SDK's host/origin
-checks. This is custom bearer authentication, **not OAuth**. This release is not a hosted,
-Internet-facing, or multi-user service. A vision-capable model and client that supports
-MCP image blocks are required to inspect images. The server does not classify animals.
+> Loopback HTTP binds strictly to `127.0.0.1`, enforces constant-time bearer token verification, and retains MCP SDK host/origin validation. It is not an OAuth provider or a multi-user/Internet-facing service.
 
-## Tools
+---
 
-| Tool | Purpose |
-| --- | --- |
-| `list_cameras` | Owned/shared inventory, optional name/ID substring, model and selected status/configuration, explicit discovery warnings. |
-| `get_camera` | Status and configuration for one accessible camera. |
-| `camera_health` | Stale reported status, signal and memory thresholds; unknown measurements remain unknown. |
-| `list_photos` | Live metadata across selected cameras; capture-time, species, tag, favorite, media and time-of-day filters. |
-| `list_photo_tags` | Available filter identifiers, optionally for a camera model. |
-| `get_photo` | Refresh an owned photo's metadata and media references by camera/photo ID. |
-| `latest_photos` | Actual newest image by capture time for each camera; follow `next_offset` to cover the fleet. |
-| `view_photo` | Inline image evidence, optional bounded resizing. |
-| `create_contact_sheet` | Labeled comparison of 1–12 photos, selectable rendition (large by default), explicit failed tiles and ID associations. |
-| `download_photo` | Save an existing image with SHA-256; never overwrite another file. |
-| `download_video` | Save an existing MP4 rendition, subject to size limits; no HLS/live streaming or paid requests. |
-| `search_catalog` | Offline, filtered, cursor-paginated metadata search. |
-| `catalog_status` | Indexed counts and capture-time coverage per camera. |
-| `start_photo_sync` | Create a durable indexing or image-download job over fixed cameras/date boundaries. |
-| `continue_photo_sync` | Perform bounded work with per-camera checkpoints, progress and integrity-checked deduplication. |
-| `get_sync_status` | Inspect job progress and errors after a restart. |
-| `list_sync_jobs` | Find recent jobs to resume. |
-| `summarize_activity` | Indexed photo counts by camera, date, hour, weekday and tag in an IANA timezone. |
-| `export_catalog` | Bounded CSV/JSON metadata export with SHA-256 and a coverage manifest. |
+## MCP Tools, Resources, and Prompts
 
-Core inventory, photo, catalog, download, and sync tools publish explicit output schemas.
-Discovery also provides `spypoint://guide`, `spypoint://catalog/status`, and the
-`review_camera_fleet` / `archive_camera_photos` prompts. Tool annotations distinguish
-local writes from read workflows. Reads may cache sanitized metadata locally.
+All structured tools validate their responses against strict Pydantic output schemas (`extra="forbid"`) and declare MCP `ToolAnnotations` distinguishing read-only queries from local filesystem/catalog writes.
 
-Useful requests to your connected LLM:
+### 1. Fleet Discovery & Telemetry Health
 
-- “Show the latest image from every camera, including cameras that failed or had no photos.”
-- “Find this week's deer-tagged photos, then make a contact sheet of six examples.”
-- “Index September's photos from all cameras; continue the sync until it finishes or needs attention.”
-- “Compare indexed activity by camera and hour in America/Toronto. Report the coverage limits.”
-- “Download this available video, and export the selected metadata to CSV.”
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `list_cameras` | Read | List owned and enabled shared cameras (`name_contains` optional filter), model, status/configuration summary, and explicit discovery warnings. Also updates cached camera names in the local catalog. |
+| `get_camera` | Read | Retrieve status and configuration telemetry (battery, signal, SD memory, firmware, last update) for one `camera_id`. |
+| `camera_health` | Read | Evaluate reported telemetry against configurable thresholds (`stale_hours=24`, `signal_threshold=20`, `memory_threshold=90`). Preserves unknown measurements honestly without live-pinging cameras. |
 
-## Workflow examples
+### 2. Live Photo Discovery & Visual Inspection
 
-The following JSON shows tool names and their arguments, not raw JSON-RPC messages.
-Replace placeholder IDs with values returned by tools. Never supply credentials as
-arguments. Your MCP client handles the protocol envelope.
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `list_photos` | Read | Fetch live photo metadata across selected cameras (`limit` 1–100, `before`, `after`, `tags`, `favorites_only`, `species`, `time_of_day`, `media_types`, `custom_tags`) and index sanitized records into the local catalog. |
+| `list_photo_tags` | Read | List supported species, media-type, and time-of-day filter identifiers, optionally scoped to a `camera_model`. |
+| `get_photo` | Read | Fetch an owned photo's detail metadata (`camera_id`, `photo_id`) and refresh its in-memory signed media URLs without re-listing. |
+| `latest_photos` | Read | Fetch the newest photo by capture time from up to 5 cameras per call (`offset`, `camera_limit`, `include_images=true`, `size="medium"`). Follow `next_offset` until `null` for complete fleet coverage. |
+| `view_photo` | Read | Return an actual image (`small`, `medium`, `large`, or `hd`) as an MCP `ImageContent` block. Supports `camera_id` fallback for cold sessions and optional `max_edge` (256–4096 px) JPEG resizing. |
+| `create_contact_sheet` | Read | Concurrently fetch 1–12 distinct `photo_ids` and render a numbered comparison sheet (`columns` 1–4, `tile_width` 256–768 px, `size="large"`). Failed tiles are rendered and reported explicitly. |
 
-Inspect every camera in pages, following the returned `next_offset` until it is null:
+### 3. Local Media Downloads
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `download_photo` | Write | Save an existing image rendition (`size="large"` by default; accepts optional `camera_id` fallback after restart) to `SPYPOINT_DOWNLOAD_DIR` with SHA-256 verification. Never overwrites different existing files. |
+| `download_video` | Write | Save an existing MP4 rendition (`sdVideo`, `hdVideo`, or `streamVideo`; accepts optional `camera_id` fallback) up to `SPYPOINT_MAX_VIDEO_BYTES` with a SHA-256 record. Rejects HLS playlists and never orders paid media. |
+
+### 4. Local Catalog, Analytics & Exports
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `search_catalog` | Read | Offline, cursor-paginated search over locally indexed photos (`camera_ids`, `after`, `before`, `tags`, `favorites_only`, `has_video`, `limit` 1–500, `cursor`). All supplied tags must match. |
+| `catalog_status` | Read | Report local SQLite catalog totals (`photos`, `downloads`, `jobs`, `schema_version=2`) and per-camera coverage (`camera_id`, `camera_name`, `photos`, `oldest`, `newest`). |
+| `summarize_activity` | Read | Aggregate local catalog activity by camera (`camera_name` included), date, local hour, weekday, and tag in an IANA `timezone_name`. Supports `favorites_only`, `has_video`, and `reinterpret_utc_as_local` for cameras that stamp local wall-clock time with `Z`. |
+| `export_catalog` | Write | Export a bounded local catalog snapshot (`limit` up to 50,000; supports `favorites_only` and `has_video`) to UTF-8 CSV (with spreadsheet formula-injection escaping and `camera_name` column) or JSON alongside a `.manifest.json` SHA-256 record. |
+
+### 5. Resumable Sync Jobs
+
+| Tool | Mode | Description |
+| --- | --- | --- |
+| `start_photo_sync` | Write | Create a durable local indexing or image-download job (`camera_ids`, `after`, `before`, `download=false`, `size="large"`, `page_size=50`). |
+| `continue_photo_sync` | Write | Advance a sync job by `page_budget` (1–20 pages, default 1) fairly across cameras with transactional checkpoints and SHA-256 download deduplication. |
+| `get_sync_status` | Read | Inspect a sync job's durable per-camera checkpoints, counts, and errors offline. |
+| `list_sync_jobs` | Read | List recent sync jobs (`limit` 1–100) for the active credential namespace so interrupted archives can be resumed. |
+
+### MCP Resources & Prompts
+
+| URI / Name | Type | Purpose |
+| --- | --- | --- |
+| `spypoint://guide` | Resource | Workflow guidance, pagination rules, and interpretation boundaries for LLM agents. |
+| `spypoint://catalog/status` | Resource | JSON snapshot of local catalog counts and per-camera date coverage. |
+| `review_camera_fleet` | Prompt | Guided workflow to inspect fleet health and view the latest photo from every camera. |
+| `archive_camera_photos` | Prompt | Guided workflow (`after`, `before`) to run a checkpointed local sync until completion or attention. |
+
+---
+
+## Workflow Examples
+
+### Example Prompts for Your LLM
+
+- *"Check camera health across my fleet, then show the latest photo from every camera."*
+- *"Find this week's deer-tagged photos and build a 2-column contact sheet of the top 6 images."*
+- *"Index all photos from September into the local catalog, continuing the sync until finished."*
+- *"Summarize indexed camera activity in `America/Toronto` and warn me if any cameras appear to use local wall-clock `Z` timestamps."*
+- *"Search my local catalog for favorite clips that have video available, download the `sdVideo` MP4, and export the matching metadata to CSV."*
+
+### Tool Call Payload Examples
+
+The JSON snippets below show MCP tool names and arguments (replace placeholder IDs with values returned by discovery tools):
+
+**1. Inspect the latest photo across cameras (paginate using `next_offset`):**
 
 ```json
 {
@@ -164,37 +214,13 @@ Inspect every camera in pages, following the returned `next_offset` until it is 
 }
 ```
 
-Find photos within a capture-time interval. Use `list_photo_tags` to discover supported
-species/filter identifiers; the example dates and camera ID are placeholders:
-
-```json
-{
-  "tool": "list_photos",
-  "arguments": {
-    "camera_ids": [
-      "CAMERA_ID"
-    ],
-    "after": "2026-09-01T00:00:00-04:00",
-    "before": "2026-09-02T00:00:00-04:00",
-    "species": [
-      "deer"
-    ],
-    "limit": 20
-  }
-}
-```
-
-Compare selected photos using actual image content. Large images make the default
-contact sheet more useful than small thumbnails; only available renditions can be used:
+**2. Render a high-resolution comparison contact sheet:**
 
 ```json
 {
   "tool": "create_contact_sheet",
   "arguments": {
-    "photo_ids": [
-      "PHOTO_ID_1",
-      "PHOTO_ID_2"
-    ],
+    "photo_ids": ["PHOTO_ID_1", "PHOTO_ID_2", "PHOTO_ID_3", "PHOTO_ID_4"],
     "size": "large",
     "columns": 2,
     "tile_width": 480
@@ -202,199 +228,179 @@ contact sheet more useful than small thumbnails; only available renditions can b
 }
 ```
 
-Search indexed metadata offline. Follow `next_cursor` with the same filters until null.
-An empty result says nothing about photos that have not been indexed:
+**3. Search the local catalog offline for photos with available video:**
 
 ```json
 {
   "tool": "search_catalog",
   "arguments": {
-    "camera_ids": [
-      "CAMERA_ID"
-    ],
-    "tags": [
-      "deer"
-    ],
+    "camera_ids": ["CAMERA_ID"],
+    "tags": ["deer"],
+    "favorites_only": false,
+    "has_video": true,
     "limit": 50
   }
 }
 ```
 
-`search_catalog` requires every supplied tag to match. Live SPYPOINT filtering is
-vendor-controlled and may differ from local search semantics. The catalog is populated
-by photo listings, latest-photo retrieval, detail refreshes, and sync jobs.
+**4. Summarize activity in local time with wall-clock `Z` reinterpretation:**
 
-## Archive and resume
+```json
+{
+  "tool": "summarize_activity",
+  "arguments": {
+    "timezone_name": "America/Toronto",
+    "after": "2026-09-01T00:00:00-04:00",
+    "before": "2026-10-01T00:00:00-04:00",
+    "reinterpret_utc_as_local": true,
+    "limit": 10000
+  }
+}
+```
 
-A sync captures the camera list and upper date boundary at creation. `start_photo_sync`
-only creates a job; call `continue_photo_sync` repeatedly to do work, or use the CLI:
+---
+
+## Resumable Archiving and Sync
+
+Bulk archiving is split into job creation (`start_photo_sync`) and bounded step execution (`continue_photo_sync`) so long transfers never time out an MCP request. You can also drive sync jobs directly from the CLI:
 
 ```sh
+# Create a sync job and process the first 5 upstream pages
 uv run spypoint-mcp sync --env-file .env --after 2026-09-01T00:00:00-04:00 --download --page-budget 5
+
+# Resume an existing job by ID
 uv run spypoint-mcp sync --env-file .env --job-id JOB_ID --page-budget 5
+
+# Inspect local catalog coverage offline
 uv run spypoint-mcp catalog --env-file .env
 ```
 
-Replace `JOB_ID` with the `id` printed by the first command. Add repeated
-`--camera-id CAMERA_ID` options to select cameras when creating a job. Omit `--download`
-for metadata-only indexing; bulk sync saves images, not videos. Use `download_video`
-separately for an available MP4. MCP sync creation additionally accepts image `size`
-and `page_size`; the CLI uses their defaults (`large` and 50).
+- **Fairness & Checkpoints**: Each step processes between 1 and 20 upstream pages round-robin across selected cameras and commits to SQLite after every page.
+- **Integrity-Verified Deduplication**: When `download=true` (`--download`), existing files on disk are reused only if their path, byte length, and SHA-256 digest match the recorded download manifest.
+- **Job Statuses**:
+  - `pending`: More pages remain; call `continue_photo_sync` (or rerun `spypoint-mcp sync --job-id ...`) to continue.
+  - `finished`: All observed pages within the capture-time window were exhausted.
+  - `partial`: Initial camera discovery was incomplete, though accessible cameras finished.
+  - `needs_attention`: One or more cameras encountered an upstream error or `pagination_stalled`.
 
-Each call processes at most 20 upstream pages (default one), fairly across cameras.
-Checkpoints commit after complete pages. Interrupted pages can be retried; previously
-saved files are reused only after path, byte-count, and SHA-256 checks. Conflicting
-concurrent checkpoints fail explicitly. There is no background scheduler.
+---
 
-`pending` means more calls are needed; `finished` means the observed pages were exhausted;
-`partial` records incomplete initial camera discovery; `needs_attention` indicates errors
-or stalled pagination. CLI returns 2 for partial/needs-attention and 0 for pending/finished;
-a zero exit code alone does not prove completion. Resumed jobs retain their filters.
-To refresh recent arrivals, start another job with an overlapping date range. Deduplication
-avoids duplicate files, but a capture-time window can miss delayed uploads with older
-capture dates. Re-scan a suitably wider range when this matters.
+## CLI Reference
 
-## CLI reference
+Run `uv run spypoint-mcp --help` for full command usage or `uv run spypoint-mcp --version` for the package version.
 
-Run `uv run spypoint-mcp --help` for the full option list and
-`uv run spypoint-mcp --version` for the installed version. Use `--env-file .env` with
-account/catalog commands unless supplying configuration through the process environment.
-
-| Command | Behavior / relevant options |
+| Command | Description & Key Options |
 | --- | --- |
-| `serve` (default) | Starts stdio; `--transport streamable-http --port 8000` enables authenticated loopback HTTP. |
-| `configure` | Prompts locally and creates `--env-file`; defaults to `.env` in the working directory. |
-| `doctor` | Checks authentication/discovery; `--check-images` also fetches one small image per camera. |
-| `client-config` | Prints JSON configuration with absolute paths; does not register or launch a client. |
-| `sync` | Creates and advances a job; accepts `--camera-id`, `--after`, `--before`, `--download`, `--page-budget`. Resume with `--job-id` and `--page-budget`. |
-| `catalog` | Prints local indexed photo/download/job counts without network requests. |
+| `serve` *(default)* | Run the MCP server over `stdio` (default) or `--transport streamable-http --port 8000` (loopback `127.0.0.1` only). |
+| `configure` | Prompt interactively for SPYPOINT credentials and write a new `0600` `--env-file` (default `.env`). |
+| `doctor` | Validate credentials and camera discovery; add `--check-images` to verify latest-photo retrieval per camera. |
+| `client-config` | Print the `mcpServers` JSON snippet with resolved interpreter and `--env-file` paths. |
+| `sync` | Start (`--camera-id`, `--after`, `--before`, `--download`) or resume (`--job-id`) a local sync job with `--page-budget` (1–20). |
+| `catalog` | Print local SQLite catalog counts and per-camera date coverage without making network calls. |
 
-Exit codes: `0` means command success (including a sync still `pending`); `1` indicates
-an operational/configuration error or failed doctor check; `2` indicates CLI usage errors
-or a sync requiring attention/partial coverage; `130` indicates cancellation during
-interactive input or a keyboard interrupt. Inspect the JSON job state as well as the exit code.
+**Exit Codes**:
+- `0`: Success (including a `sync` command whose job status is `pending` or `finished`).
+- `1`: Operational, network, or configuration error, or a failed `doctor` check.
+- `2`: CLI argument error, or a `sync` job ending in `partial` / `needs_attention`.
+- `130`: Interrupted via `Ctrl+C` or EOF during interactive prompts.
 
-## Dates, references, and coverage
+---
 
-Photo listing/catalog `date` is normalized capture time from `originDate`, falling back
-to upload `date` only when absent. `captured_at` and `uploaded_at` preserve their upstream values. User date
-bounds require timezone offsets. **Known limitation:** some cameras encode local wall-clock capture time with a `Z`
-suffix. Automatic conversion then gives incorrect local activity hours. `summarize_activity`
-flags suspected capture/upload skew and supports `reinterpret_utc_as_local=true`; you can
-also set `SPYPOINT_CAMERA_TIME_MODE=wall_clock_z` with `SPYPOINT_CAMERA_TIMEZONE` to
-normalize mislabeled `Z` capture times during ingestion. Compare the burned-in image time
-with metadata before relying on timezone-based summaries.
+## Timestamps, Media References, and Coverage Semantics
 
-Upstream timestamps without an offset require an explicit
-`SPYPOINT_CAMERA_TIMEZONE`; ambiguous or nonexistent DST times are rejected.
+### Capture Time vs. Upload Time & Wall-Clock `Z` Skew
 
-Owned queries use `dateStart`/`dateEnd`; shared cameras use a separate endpoint. Exact
-boundary inclusion is vendor-dependent: use an overlapping interval and deduplicate
-when an image falls exactly on a boundary. Shared custom tags are unsupported. Live filter semantics still need account verification.
-`list_photos.limit` is the combined page size (maximum 100), not a quota per camera.
-Omit `camera_ids` for all discovered cameras; `[]` selects none. Use `latest_photos`
-for fair fleet coverage (up to five cameras per call).
+- Photo `date` in tool outputs and the local catalog is normalized **capture time** (`originDate`), falling back to upload time (`date`) only if `originDate` is absent. Both raw upstream values are preserved in `captured_at` and `uploaded_at`.
+- User-supplied `after` and `before` filters require explicit ISO-8601 timezone offsets (e.g., `2026-09-01T00:00:00-04:00` or `Z`).
+- **Naive & Wall-Clock `Z` Camera Timestamps**:
+  - If a camera reports timezone-naive timestamps, set `SPYPOINT_CAMERA_TIMEZONE` to a valid IANA timezone (e.g., `America/Toronto`). Ambiguous or nonexistent DST transitions are rejected explicitly.
+  - Some SPYPOINT cameras encode local wall-clock capture time with a literal `Z` suffix while `uploaded_at` is true UTC.
+    - At **ingestion time**, you can set `SPYPOINT_CAMERA_TIME_MODE=wall_clock_z` alongside `SPYPOINT_CAMERA_TIMEZONE` so `Z`-suffixed capture timestamps are reinterpreted in the configured camera timezone.
+    - At **analysis time**, `summarize_activity` automatically compares `captured_at` and `uploaded_at` to flag `suspected_wall_clock_z_photos` and emit `timestamp_warnings`, and supports `reinterpret_utc_as_local=true` on already-indexed catalog data.
 
-Date pagination has no verified opaque upstream cursor. Reusing `next_before` can repeat
-boundary photos. Sync deduplicates IDs and expands repeated pages to 100 items; if it
-still cannot advance, it reports `pagination_stalled` without skipping timestamps.
-Neither a finished job nor a local catalog proves complete historical retention,
-all camera captures, or absence of wildlife. Activity counts are **photos**, not animals
-or visits. Analysis and export report truncation and local coverage explicitly.
+### Signed Media Reference Lifetime & Cold Sessions
 
-Signed media references live in memory for 15 minutes, at most 2,000 photos. The local
-catalog stores sanitized metadata, never signed URLs. Owned references can refresh via
-`get_photo`; shared references require a fresh listing after expiry/restart. No size is
-silently substituted. Image sizes are `small`, `medium`, `large`, `hd`; available video
-sizes are `sdVideo`, `hdVideo`, `streamVideo`, when an existing MP4 URL is supplied.
+- Upstream signed image and video URLs are cached in memory for **15 minutes** (bounded to 2,000 photos) and are never written to disk.
+- After a process restart or cache expiry:
+  - **Owned cameras**: Pass `camera_id` to `view_photo`, `download_photo`, or `download_video` (or call `get_photo`)—or let the server resolve `camera_id` automatically from the local SQLite catalog—to refresh the photo's signed URLs on demand.
+  - **Shared cameras**: SPYPOINT's web API does not expose the single-photo detail endpoint for shared cameras; re-list the shared camera via `list_photos` or `latest_photos` to refresh its signed URLs.
 
-## Configuration and privacy
+### Pagination & Ecological Interpretation Limits
 
-See [.env.example](.env.example). Only an explicitly supplied environment file is loaded;
-process environment values override it. Relative paths resolve beside that file, or
-against the working directory when no file is supplied.
+- Date pagination relies on capture-time boundaries (`next_before`). If more than 100 photos share the exact same millisecond timestamp, the sync engine expands the page size and deduplicates IDs; if progress remains impossible, it records `pagination_stalled` rather than skipping timestamps.
+- Activity counts represent **indexed photographs**, never unique individual animals, visits, or population estimates. Missing photos do not prove wildlife absence.
 
-| Setting | Default / meaning |
-| --- | --- |
-| `SPYPOINT_USERNAME`, `SPYPOINT_PASSWORD` | Local password login; alternatively `SPYPOINT_TOKEN`. |
-| `SPYPOINT_DOWNLOAD_DIR` | `downloads`; photos, videos and exports. |
-| `SPYPOINT_STATE_DIR` | `.spypoint-state`; per-credential-namespace SQLite catalog and checkpoints. |
-| `SPYPOINT_INCLUDE_SHARED` | `true`; include shared cameras. |
-| `SPYPOINT_CAMERA_TIMEZONE` | Unset; supply when interpreting timezone-less or `wall_clock_z` upstream timestamps. |
-| `SPYPOINT_CAMERA_TIME_MODE` | `strict`; set to `wall_clock_z` with `SPYPOINT_CAMERA_TIMEZONE` for mislabeled `Z` local times. |
-| `SPYPOINT_TIMEOUT_SECONDS` | 30 seconds per request; allowed 1–120. |
-| `SPYPOINT_MAX_IMAGE_BYTES` | 10,000,000; allowed 1,024–50,000,000. |
-| `SPYPOINT_MAX_VIDEO_BYTES` | 100,000,000; allowed 1,024–500,000,000. |
-| `SPYPOINT_IMAGE_HOSTS` | Optional exact additional trusted CDN hostnames. |
-| `SPYPOINT_MCP_HTTP_TOKEN` | Independent bearer token required for optional loopback HTTP. |
+---
 
-The adapter makes bounded retries, hides upstream error bodies and signed URLs, isolates
-API auth from the media client, rejects redirects, and checks hostnames/media signatures.
-Media sizes are bounded; derived images also have a decoded pixel budget. Generated
-filenames and atomic writes prevent model-selected paths and accidental overwrites.
-CSV cells are escaped against spreadsheet formula execution. HTTP proxy environment
-variables are ignored. See [security and data handling](SECURITY.md) for threat boundaries.
+## Configuration and Security
 
-Local metadata, saved images and exports remain until you remove them. Changing password
-for the same username preserves the catalog namespace; replacing a token changes it.
-An account namespace is not an operating-system security boundary. Stop the server before
-backing up/removing its state directory. Original downloaded images can retain EXIF;
-resized images and contact sheets are derivatives with metadata removed. Any images
-returned through MCP are sent to your chosen client/model under that provider's policies.
+Configuration is loaded **only** from an explicitly provided `--env-file` and/or process environment variables (which take precedence). Existing `.env` files are never auto-discovered from parent directories. See [.env.example](.env.example).
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `SPYPOINT_USERNAME` | *(none)* | SPYPOINT account email/username for password authentication. |
+| `SPYPOINT_PASSWORD` | *(none)* | SPYPOINT account password (supports automatic 1x session refresh). |
+| `SPYPOINT_TOKEN` | *(none)* | Optional pre-existing bearer token (used instead of username/password; cannot self-refresh). |
+| `SPYPOINT_DOWNLOAD_DIR` | `downloads` | Directory for downloaded photos, videos, and catalog exports. |
+| `SPYPOINT_STATE_DIR` | `.spypoint-state` | Directory for credential-namespaced SQLite catalogs (`catalog.sqlite3`). |
+| `SPYPOINT_INCLUDE_SHARED` | `true` | Include shared cameras (`true` or `false`). |
+| `SPYPOINT_CAMERA_TIMEZONE` | *(unset)* | IANA timezone (e.g., `America/Toronto`) for naive or `wall_clock_z` camera timestamps. |
+| `SPYPOINT_CAMERA_TIME_MODE` | `strict` | Timestamp mode: `strict` (trust upstream offsets) or `wall_clock_z` (reinterpret `Z` as `SPYPOINT_CAMERA_TIMEZONE`). |
+| `SPYPOINT_TIMEOUT_SECONDS` | `30` | Per-request HTTP timeout in seconds (`1`–`120`, finite). |
+| `SPYPOINT_MAX_IMAGE_BYTES` | `10000000` | Maximum bytes per downloaded image (`1024`–`50000000`). |
+| `SPYPOINT_MAX_VIDEO_BYTES` | `100000000` | Maximum bytes per downloaded MP4 video (`1024`–`500000000`). |
+| `SPYPOINT_IMAGE_HOSTS` | *(empty)* | Optional comma-separated list of additional trusted HTTPS media CDN hostnames. |
+| `SPYPOINT_MCP_HTTP_TOKEN` | *(empty)* | Required bearer secret (`>= 32` ASCII chars) when using `--transport streamable-http`. |
+
+### Security Highlights
+
+- **Isolated Media Transport**: Media downloads use a separate unauthenticated HTTP client that rejects redirects, ignores proxy environment variables (`trust_env=False`), enforces HTTPS allowlists (S3/CloudFront + `SPYPOINT_IMAGE_HOSTS`), validates magic-byte signatures (`JPEG`, `PNG`, `WebP`, `MP4/ftyp`), and enforces decoded pixel limits (`36,000,000` px).
+- **Safe Local Storage**: Output filenames are server-generated and written atomically with `0600` permissions inside `0700` directories; symlinked state/download roots are rejected. CSV exports escape cells beginning with `=`, `+`, `-`, `@`, or control characters to prevent spreadsheet formula injection.
+- **Prompt-Injection Defense**: Tool instructions and prompts explicitly mark camera names, custom tags, and burned-in image text as untrusted data.
+
+See [SECURITY.md](SECURITY.md) for full threat boundaries, retention details, and vulnerability reporting guidelines.
+
+---
 
 ## Troubleshooting
 
-| Symptom | What to check or do |
+| Symptom | Cause & Resolution |
 | --- | --- |
-| Credentials missing or file not found | Supply the explicit `--env-file` path. Existing `.env` files are never discovered automatically. |
-| `configure` says the file exists | Edit that private file locally; the command intentionally refuses to overwrite credentials. |
-| Authentication fails or a token expires | Check the account in SPYPOINT's own app. Replace a token locally or configure username/password for refresh. MFA/CAPTCHA/federated login need additional adapter support. |
-| Server appears to hang when run manually | Stdio waits for MCP input. Start it through the configured MCP client, or run `doctor` for a human-readable check. |
-| MCP client cannot start the server | Verify the absolute interpreter/env-file paths from `client-config`; regenerate them after moving the project and reload the client. |
-| Photo reference expired or requested size unavailable | List photos again, or refresh an owned photo with `get_photo`. Select a rendition in `available_sizes` / `available_video_sizes`; HD must already exist. |
-| Upstream date lacks a timezone | Set a known `SPYPOINT_CAMERA_TIMEZONE`. Do not guess the camera's timezone; ambiguous DST times are rejected. |
-| Partial discovery or a per-camera failure | Inspect `warnings` and camera results. Retry after checking account/share access; successful cameras do not imply complete coverage. |
-| `pagination_stalled` | Preserve the checkpoint and report the boundary. Do not subtract time to force progress: that could skip images. |
-| Existing download or integrity mismatch | Standalone downloads refuse overwrite. Sync reuses only verified files; inspect or move a conflicting local file before retrying. |
-| Image/response exceeds its budget | Choose a smaller rendition, fewer cameras, or `view_photo.max_edge`; use a contact sheet for comparisons. |
-| Rate limit or timeout | Wait as directed, lower `page_budget`/`camera_limit`, and retry. HTTP timeout is per request, not a total job deadline. |
-| HTTP returns 401 | Verify the independent local bearer token and header. The SPYPOINT account token is not the MCP HTTP token. |
-| HTTP rejects a host/origin | Use the documented loopback endpoint; keep SDK host/origin protection enabled. Public hosting is outside this release. |
-| Catalog looks empty after a credential change | Confirm the state path and credential namespace. Changing a bearer token selects a new namespace; it does not erase previous files. |
+| `Missing SPYPOINT credentials` or `.env` not found | Pass `--env-file /path/to/.env` explicitly; `.env` files are never auto-discovered. |
+| `Credential file already exists` during `configure` | `configure` refuses to overwrite existing files. Edit your `.env` file directly. |
+| `401` / authentication failure on SPYPOINT API | Verify credentials in the official SPYPOINT app. Replace an expired `SPYPOINT_TOKEN` or switch to `SPYPOINT_USERNAME` + `SPYPOINT_PASSWORD`. |
+| `serve` appears to hang in terminal | `serve` waits silently on `stdio` for JSON-RPC input from an MCP client. Run `spypoint-mcp doctor` for interactive diagnostics. |
+| `Photo reference expired or not found` | Signed media URLs expire after 15 minutes. For owned cameras, supply `camera_id` (or call `get_photo`); for shared cameras, re-run `list_photos` or `latest_photos`. |
+| `Camera timestamp has no timezone` | Set `SPYPOINT_CAMERA_TIMEZONE` to your camera's IANA timezone (e.g., `America/Toronto`). |
+| Activity hours look shifted by the UTC offset | Some cameras label local wall-clock time with `Z`. Pass `reinterpret_utc_as_local=true` to `summarize_activity`, or set `SPYPOINT_CAMERA_TIME_MODE=wall_clock_z` with `SPYPOINT_CAMERA_TIMEZONE`. |
+| `pagination_stalled` during sync | More than 100 photos share an identical timestamp boundary. Inspect the reported timestamp; never subtract time manually to bypass the boundary, as that can silently skip photos. |
+| `Combined images exceed the MCP response budget` | Reduce `camera_limit`, choose `size="small"` or `"medium"`, set `view_photo.max_edge`, or use `create_contact_sheet`. |
+| Loopback HTTP returns `401` or `403` | Ensure `Authorization: Bearer <SPYPOINT_MCP_HTTP_TOKEN>` matches `.env` and that you are connecting via `http://127.0.0.1:<port>/mcp`. |
+| Catalog looks empty after changing credentials | Catalogs are namespaced by `sha256(username)` or `sha256(token)`. Switching from password mode to token mode (or rotating a token) creates a fresh namespace directory under `.spypoint-state/`. |
 
-For a reproducible issue, record the version, command/tool, redacted error and expected
-behavior. Review doctor output before sharing; it includes camera IDs. Do not include
-passwords, bearer tokens, signed links or private photos. Report reproducible, non-sensitive bugs in the
-[issue tracker](https://github.com/thesven/spypoint_mcp/issues). For security issues,
-follow [SECURITY.md](SECURITY.md) and avoid public disclosure of secrets.
+---
 
-## Development and verification
+## Development and Verification
+
+Run the full lint, format, test, coverage, package-audit, and wheel smoke-test pipeline locally with `uv`:
 
 ```sh
 uv sync --locked
 uv run ruff check src tests scripts
 uv run ruff format --check src tests scripts
-uv run pytest --cov=spypoint_mcp --cov-branch -q
+uv run pytest -W error --cov=spypoint_mcp --cov-branch -q
 uv build
 uv run python scripts/check_dist.py
 uv run --no-project --with ./dist/spypoint_mcp-0.2.0-py3-none-any.whl python scripts/smoke.py
 ```
 
-The current offline suite has **112 passing tests** on the three locally tested Python
-versions, with **89.95% branch-inclusive coverage** on Python 3.12. Live tests exercised
-18 tools against one owned camera; shared-camera access and MP4 downloads were not
-verified live. The source archive and wheel are inspected for excluded private paths,
-and a fresh wheel installation is checked over stdio. These results are bounded evidence,
-not a promise of compatibility with every model, plan or client.
+- **Test Suite & Coverage**: **127 automated tests** pass with **90.34% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
+- **Project Documentation**:
+  - [API_COMPATIBILITY.md](API_COMPATIBILITY.md) — Upstream SPYPOINT REST endpoints, payload contracts, and known limitations
+  - [VERIFICATION.md](VERIFICATION.md) & [LIVE_VERIFICATION.json](LIVE_VERIFICATION.json) — Offline and live-account verification evidence
+  - [SECURITY.md](SECURITY.md) — Security model, trust boundaries, and data handling
+  - [CHANGELOG.md](CHANGELOG.md) — Release history and schema changes
+  - [ROADMAP.md](ROADMAP.md) — Release acceptance criteria and future milestones
+  - [CONTRIBUTING.md](CONTRIBUTING.md) — Contribution and verification standards
 
-To upgrade this source installation, stop its MCP process, preserve the private env file,
-back up state/downloads, replace the source with the intended release, run `uv sync --locked`,
-and restart the client. Regenerate client configuration if installation paths changed.
-See [CHANGELOG.md](CHANGELOG.md) before upgrades that alter output or storage schemas.
-Removing the MCP client entry and stopping the server disconnects it; local credentials,
-state and downloads remain until you remove them. SPYPOINT account data is unaffected.
-
-See [contribution guidance](CONTRIBUTING.md), [changelog](CHANGELOG.md),
-[release acceptance plan](ROADMAP.md), and [verification evidence](VERIFICATION.md).
-The lockfile pins dependencies; published SDK APIs are used. SPYPOINT is a third-party
-trademark, and this project is not affiliated with or endorsed by SPYPOINT.
+*SPYPOINT is a trademark of its respective owner. This project is an independent, unofficial integration and is not affiliated with, endorsed by, or sponsored by SPYPOINT.*
