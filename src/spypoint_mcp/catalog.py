@@ -4,13 +4,15 @@ import asyncio
 import base64
 import hashlib
 import json
+import math
 import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from .client import timestamp
+from .analysis import _extract_battery_level
+from .client import identifier, timestamp
 from .config import Settings, SpypointError
 
 
@@ -41,6 +43,7 @@ def selection(
     tags,
     favorites_only,
     has_video: bool | None = None,
+    user_tags: list[str] | None = None,
 ):
     clauses, params = [], []
     if camera_ids is not None:
@@ -66,7 +69,34 @@ def selection(
     for tag in set(tags or []):
         clauses.append("EXISTS (SELECT 1 FROM json_each(photos.metadata, '$.tags') WHERE value=?)")
         params.append(tag)
+    for utag in set(user_tags or []):
+        clauses.append(
+            "EXISTS (SELECT 1 FROM photo_annotations pa, json_each(pa.user_tags) "
+            "WHERE pa.photo_id = photos.id AND value = ?)"
+        )
+        params.append(utag)
     return clauses, params
+
+
+def _attach_annotations(db, photos: list[dict]) -> list[dict]:
+    if not photos:
+        return photos
+    ids = [p["id"] for p in photos]
+    placeholders = ",".join("?" for _ in ids)
+    rows = db.execute(
+        "SELECT photo_id, note, user_tags FROM photo_annotations "
+        f"WHERE photo_id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    by_id = {row["photo_id"]: (row["note"], json.loads(row["user_tags"])) for row in rows}
+    for photo in photos:
+        if photo["id"] in by_id:
+            note, utags = by_id[photo["id"]]
+            if note:
+                photo["user_note"] = note
+            if utags:
+                photo["user_tags"] = utags
+    return photos
 
 
 class Catalog:
@@ -95,11 +125,11 @@ class Catalog:
         db.row_factory = sqlite3.Row
         try:
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise SpypointError(
                     "Catalog was created by a newer server; upgrade before opening it."
                 )
-            if version < 2:
+            if version < 3:
                 db.executescript("""
                     CREATE TABLE IF NOT EXISTS photos (
                         id TEXT PRIMARY KEY, camera_id TEXT NOT NULL, date TEXT NOT NULL,
@@ -123,7 +153,26 @@ class Catalog:
                         id TEXT PRIMARY KEY, name TEXT NOT NULL, shared INTEGER NOT NULL,
                         model TEXT, updated_at TEXT NOT NULL
                     );
-                    PRAGMA user_version=2;
+                    CREATE TABLE IF NOT EXISTS camera_telemetry (
+                        camera_id TEXT NOT NULL, observed_at TEXT NOT NULL,
+                        signal_percentage REAL, memory_used_percentage REAL,
+                        battery_level REAL, battery_type TEXT, raw TEXT NOT NULL,
+                        PRIMARY KEY(camera_id, observed_at)
+                    );
+                    CREATE INDEX IF NOT EXISTS telemetry_camera_time
+                        ON camera_telemetry(camera_id, observed_at);
+                    CREATE TABLE IF NOT EXISTS photo_annotations (
+                        photo_id TEXT NOT NULL PRIMARY KEY,
+                        note TEXT NOT NULL,
+                        user_tags TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS sync_watermarks (
+                        key TEXT PRIMARY KEY,
+                        watermark TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    PRAGMA user_version=3;
                 """)
             with db:
                 yield db
@@ -184,6 +233,67 @@ class Catalog:
                     observed,
                 ),
             )
+            last_upd = camera.get("last_update")
+            obs_time = observed
+            if isinstance(last_upd, str) and last_upd:
+                try:
+                    obs_time = timestamp(last_upd)
+                except SpypointError:
+                    obs_time = observed
+            sig = camera.get("signal")
+            sig = sig.get("processed", {}) if isinstance(sig, dict) else {}
+            sig_pct = sig.get("percentage") if isinstance(sig, dict) else None
+            if not (
+                isinstance(sig_pct, (int, float))
+                and not isinstance(sig_pct, bool)
+                and math.isfinite(sig_pct)
+                and 0 <= sig_pct <= 100
+            ):
+                sig_pct = None
+            mem = camera.get("memory")
+            mem_pct = None
+            if isinstance(mem, dict):
+                used, size = mem.get("used"), mem.get("size")
+                if (
+                    isinstance(used, (int, float))
+                    and isinstance(size, (int, float))
+                    and not isinstance(used, bool)
+                    and not isinstance(size, bool)
+                    and math.isfinite(used)
+                    and math.isfinite(size)
+                    and size > 0
+                    and 0 <= used <= size
+                ):
+                    mem_pct = round(100.0 * used / size, 2)
+            bat_level, bat_type = _extract_battery_level(camera.get("batteries"))
+            raw_telemetry = json.dumps(
+                {
+                    "signal_percentage": sig_pct,
+                    "memory_used_percentage": mem_pct,
+                    "battery_level": bat_level,
+                    "battery_type": bat_type,
+                }
+            )
+            db.execute(
+                """
+                INSERT INTO camera_telemetry VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(camera_id, observed_at) DO UPDATE SET
+                    signal_percentage=excluded.signal_percentage,
+                    memory_used_percentage=excluded.memory_used_percentage,
+                    battery_level=excluded.battery_level,
+                    battery_type=excluded.battery_type,
+                    raw=excluded.raw
+            """,
+                (
+                    camera["id"],
+                    obs_time,
+                    sig_pct,
+                    mem_pct,
+                    bat_level,
+                    bat_type,
+                    raw_telemetry,
+                ),
+            )
 
     async def remember(self, photos: list[dict]) -> None:
         await self._run(self._upsert, photos)
@@ -191,10 +301,201 @@ class Catalog:
     async def remember_cameras(self, cameras: list[dict]) -> None:
         await self._run(self._upsert_cameras, cameras)
 
+    async def record_telemetry(
+        self,
+        camera_id: str,
+        observed_at: str,
+        signal_percentage: float | None = None,
+        memory_used_percentage: float | None = None,
+        battery_level: float | None = None,
+        battery_type: str | None = None,
+    ) -> None:
+        identifier({"id": camera_id})
+        obs = timestamp(observed_at)
+
+        def save(db):
+            raw = json.dumps(
+                {
+                    "signal_percentage": signal_percentage,
+                    "memory_used_percentage": memory_used_percentage,
+                    "battery_level": battery_level,
+                    "battery_type": battery_type,
+                }
+            )
+            db.execute(
+                """
+                INSERT INTO camera_telemetry VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(camera_id, observed_at) DO UPDATE SET
+                    signal_percentage=excluded.signal_percentage,
+                    memory_used_percentage=excluded.memory_used_percentage,
+                    battery_level=excluded.battery_level,
+                    battery_type=excluded.battery_type,
+                    raw=excluded.raw
+            """,
+                (
+                    camera_id,
+                    obs,
+                    signal_percentage,
+                    memory_used_percentage,
+                    battery_level,
+                    battery_type,
+                    raw,
+                ),
+            )
+
+        await self._run(save)
+
+    async def telemetry_history(
+        self,
+        camera_ids: list[str] | None = None,
+        limit_per_camera: int = 100,
+    ) -> dict:
+        if not 1 <= limit_per_camera <= 1000:
+            raise SpypointError("limit_per_camera must be between 1 and 1000.")
+
+        def read(db):
+            camera_names = {
+                row["id"]: row["name"]
+                for row in db.execute("SELECT id, name FROM cameras").fetchall()
+            }
+            if camera_ids is not None:
+                if not camera_ids:
+                    return {"records_by_camera": {}, "camera_names": camera_names}
+                if len(camera_ids) > 1000:
+                    raise SpypointError("Select at most 1000 cameras per telemetry query.")
+                cids = sorted(set(camera_ids))
+            else:
+                rows = db.execute(
+                    "SELECT DISTINCT camera_id FROM camera_telemetry ORDER BY camera_id"
+                ).fetchall()
+                cids = [r[0] for r in rows]
+            records_by_camera: dict[str, list[dict]] = {}
+            for cid in cids:
+                rows = db.execute(
+                    "SELECT camera_id, observed_at, signal_percentage, memory_used_percentage, "
+                    "battery_level, battery_type FROM camera_telemetry "
+                    "WHERE camera_id=? ORDER BY observed_at DESC LIMIT ?",
+                    (cid, limit_per_camera),
+                ).fetchall()
+                records_by_camera[cid] = [dict(r) for r in reversed(rows)]
+            return {"records_by_camera": records_by_camera, "camera_names": camera_names}
+
+        return await self._run(read)
+
+    async def annotate(
+        self,
+        photo_id: str,
+        note: str | None = None,
+        user_tags: list[str] | None = None,
+    ) -> dict:
+        identifier({"id": photo_id})
+        if note is not None and len(note) > 4000:
+            raise SpypointError("Annotation note must be at most 4000 characters.")
+        normalized_tags: list[str] | None = None
+        if user_tags is not None:
+            if len(user_tags) > 50:
+                raise SpypointError("Provide at most 50 user_tags per photo.")
+            cleaned = []
+            for tag in user_tags:
+                if not isinstance(tag, str) or not tag.strip() or len(tag.strip()) > 64:
+                    raise SpypointError("Each user tag must be a nonempty string up to 64 chars.")
+                cleaned.append(tag.strip())
+            normalized_tags = sorted(set(cleaned))
+
+        def save(db):
+            existing = db.execute(
+                "SELECT note, user_tags FROM photo_annotations WHERE photo_id=?", (photo_id,)
+            ).fetchone()
+            final_note = (
+                note.strip()
+                if note is not None
+                else (existing["note"] if existing is not None else "")
+            )
+            final_tags = (
+                normalized_tags
+                if normalized_tags is not None
+                else (json.loads(existing["user_tags"]) if existing is not None else [])
+            )
+            updated = now()
+            db.execute(
+                """
+                INSERT INTO photo_annotations VALUES (?, ?, ?, ?)
+                ON CONFLICT(photo_id) DO UPDATE SET
+                    note=excluded.note, user_tags=excluded.user_tags, updated_at=excluded.updated_at
+            """,
+                (photo_id, final_note, json.dumps(final_tags), updated),
+            )
+            return {
+                "photo_id": photo_id,
+                "note": final_note,
+                "user_tags": final_tags,
+                "updated_at": updated,
+                "scope": "local_catalog",
+            }
+
+        return await self._run(save)
+
+    async def get_annotation(self, photo_id: str) -> dict:
+        identifier({"id": photo_id})
+
+        def read(db):
+            row = db.execute(
+                "SELECT note, user_tags, updated_at FROM photo_annotations WHERE photo_id=?",
+                (photo_id,),
+            ).fetchone()
+            if row is None:
+                return {
+                    "photo_id": photo_id,
+                    "note": "",
+                    "user_tags": [],
+                    "updated_at": None,
+                    "scope": "local_catalog",
+                }
+            return {
+                "photo_id": photo_id,
+                "note": row["note"],
+                "user_tags": json.loads(row["user_tags"]),
+                "updated_at": row["updated_at"],
+                "scope": "local_catalog",
+            }
+
+        return await self._run(read)
+
+    async def get_watermark(self, key: str) -> dict | None:
+        identifier({"id": key})
+
+        def read(db):
+            row = db.execute(
+                "SELECT key, watermark, updated_at FROM sync_watermarks WHERE key=?", (key,)
+            ).fetchone()
+            return dict(row) if row else None
+
+        return await self._run(read)
+
+    async def set_watermark(self, key: str, watermark: str) -> dict:
+        identifier({"id": key})
+        wm = timestamp(watermark)
+
+        def save(db):
+            updated = now()
+            db.execute(
+                """
+                INSERT INTO sync_watermarks VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    watermark=excluded.watermark, updated_at=excluded.updated_at
+            """,
+                (key, wm, updated),
+            )
+            return {"key": key, "watermark": wm, "updated_at": updated}
+
+        return await self._run(save)
+
     async def get(self, photo_id: str) -> dict | None:
         def get(db):
             row = db.execute("SELECT metadata FROM photos WHERE id=?", (photo_id,)).fetchone()
-            return json.loads(row[0]) if row else None
+            if not row:
+                return None
+            return _attach_annotations(db, [json.loads(row[0])])[0]
 
         return await self._run(get)
 
@@ -208,6 +509,7 @@ class Catalog:
         limit: int = 50,
         cursor: str | None = None,
         has_video: bool | None = None,
+        user_tags: list[str] | None = None,
     ) -> dict:
         if not 1 <= limit <= 500:
             raise SpypointError("Catalog page limit must be between 1 and 500.")
@@ -222,6 +524,7 @@ class Catalog:
             sorted(set(tags or [])),
             favorites_only,
             has_video,
+            sorted(set(user_tags or [])),
         ]
         digest = hashlib.sha256(json.dumps(spec).encode()).hexdigest()
         boundary = None
@@ -243,7 +546,9 @@ class Catalog:
                 ) from None
 
         def search(db):
-            clauses, params = selection(camera_ids, after, before, tags, favorites_only, has_video)
+            clauses, params = selection(
+                camera_ids, after, before, tags, favorites_only, has_video, user_tags
+            )
             if boundary:
                 clauses.append("(date < ? OR (date = ? AND id < ?))")
                 params.extend([boundary["date"], boundary["date"], boundary["id"]])
@@ -252,7 +557,7 @@ class Catalog:
                 "SELECT metadata FROM photos" + where + " ORDER BY date DESC, id DESC LIMIT ?",
                 [*params, limit + 1],
             ).fetchall()
-            photos = [json.loads(row[0]) for row in rows[:limit]]
+            photos = _attach_annotations(db, [json.loads(row[0]) for row in rows[:limit]])
             next_cursor = None
             if len(rows) > limit:
                 last = photos[-1]
@@ -276,6 +581,7 @@ class Catalog:
         limit: int = 10000,
         favorites_only: bool = False,
         has_video: bool | None = None,
+        user_tags: list[str] | None = None,
     ) -> dict:
         """Read one consistent, bounded SQLite snapshot for analytics and export."""
         if not 1 <= limit <= 50000:
@@ -286,7 +592,9 @@ class Catalog:
             raise SpypointError("after must not be later than before.")
 
         def read(db):
-            clauses, params = selection(camera_ids, after, before, tags, favorites_only, has_video)
+            clauses, params = selection(
+                camera_ids, after, before, tags, favorites_only, has_video, user_tags
+            )
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = db.execute(
                 "SELECT metadata FROM photos" + where + " ORDER BY date DESC, id DESC LIMIT ?",
@@ -296,8 +604,9 @@ class Catalog:
                 row["id"]: row["name"]
                 for row in db.execute("SELECT id, name FROM cameras").fetchall()
             }
+            photos = _attach_annotations(db, [json.loads(row[0]) for row in rows[:limit]])
             return {
-                "photos": [json.loads(row[0]) for row in rows[:limit]],
+                "photos": photos,
                 "camera_names": camera_names,
                 "truncated": len(rows) > limit,
                 "scope": "local_catalog",
@@ -407,7 +716,7 @@ class Catalog:
                     )
                 ],
                 "scope": "local_catalog",
-                "schema_version": 2,
+                "schema_version": 3,
             }
 
         return await self._run(summary)

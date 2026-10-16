@@ -16,6 +16,7 @@ from pydantic import Field, ValidationError
 
 from . import __version__
 from .analysis import fleet_health, summarize, timezone
+from .analysis import solunar_summary as summarize_solunar
 from .client import SpypointClient
 from .config import Settings, SpypointError
 from .exports import export
@@ -28,9 +29,13 @@ from .schemas import (
     CatalogStatus,
     Download,
     FleetHealth,
+    FleetTelemetryTrends,
+    IncrementalPollResult,
     Photo,
+    PhotoAnnotation,
     PhotoFilters,
     PhotoPage,
+    SolunarSummary,
     SyncJob,
     SyncJobs,
 )
@@ -279,6 +284,7 @@ def create_server(
         after: str | None = None,
         before: str | None = None,
         tags: list[str] | None = None,
+        user_tags: list[str] | None = None,
         favorites_only: bool = False,
         has_video: bool | None = None,
         limit: Annotated[int, Field(ge=1, le=500)] = 50,
@@ -291,7 +297,15 @@ def create_server(
         """
         return CatalogPage.model_validate(
             await ctx.request_context.lifespan_context.catalog.search(
-                camera_ids, after, before, tags, favorites_only, limit, cursor, has_video
+                camera_ids,
+                after,
+                before,
+                tags,
+                favorites_only,
+                limit,
+                cursor,
+                has_video,
+                user_tags,
             )
         )
 
@@ -400,21 +414,27 @@ def create_server(
         after: str | None = None,
         before: str | None = None,
         tags: list[str] | None = None,
+        user_tags: list[str] | None = None,
         favorites_only: bool = False,
         has_video: bool | None = None,
         timezone_name: str = "UTC",
+        latitude: float | None = None,
+        longitude: float | None = None,
         reinterpret_utc_as_local: bool = False,
         limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
     ) -> ActivitySummary:
-        """Summarize indexed photo activity by camera, day, hour, weekday and tag.
+        """Summarize indexed photo activity by camera, day, hour, weekday, moon phase and tag.
 
         Uses a consistent local catalog snapshot. Counts are photos, not animals or
         visits. truncated=true means only the latest limit matching photos were analyzed.
         timezone_name is an IANA timezone. Coverage is local, not the full account.
         """
         timezone(timezone_name)
-        window = await ctx.request_context.lifespan_context.catalog.window(
-            camera_ids, after, before, tags, limit, favorites_only, has_video
+        service = ctx.request_context.lifespan_context
+        lat = latitude if latitude is not None else service.client.settings.default_latitude
+        lon = longitude if longitude is not None else service.client.settings.default_longitude
+        window = await service.catalog.window(
+            camera_ids, after, before, tags, limit, favorites_only, has_video, user_tags
         )
         result = await asyncio.to_thread(
             summarize,
@@ -423,6 +443,8 @@ def create_server(
             window["truncated"],
             reinterpret_utc_as_local,
             window.get("camera_names"),
+            lat,
+            lon,
         )
         return ActivitySummary.model_validate(
             {
@@ -452,6 +474,149 @@ def create_server(
         )
         return image_result(metadata, [({"kind": "contact_sheet"}, data, "image/jpeg")])
 
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def crop_photo(
+        photo_id: str,
+        x_min: Annotated[float, Field(ge=0.0, le=1.0)],
+        y_min: Annotated[float, Field(ge=0.0, le=1.0)],
+        x_max: Annotated[float, Field(ge=0.0, le=1.0)],
+        y_max: Annotated[float, Field(ge=0.0, le=1.0)],
+        ctx: Context,
+        size: Size = "large",
+        camera_id: str | None = None,
+        max_edge: Annotated[int, Field(ge=256, le=4096)] = 1600,
+    ) -> CallToolResult:
+        """Crop a normalized bounding box (0.0–1.0) from a photo for detailed visual inspection.
+
+        Returns an MCP image block of the cropped region without downloading full-frame tokens.
+        """
+        data, metadata = await ctx.request_context.lifespan_context.crop_photo(
+            photo_id, (x_min, y_min, x_max, y_max), size, camera_id, max_edge
+        )
+        return image_result(metadata, [(metadata, data, "image/jpeg")])
+
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def create_burst_strip(
+        photo_ids: Annotated[list[str], Field(min_length=2, max_length=8)],
+        ctx: Context,
+        direction: Literal["horizontal", "vertical"] = "horizontal",
+        tile_height: Annotated[int, Field(ge=240, le=720)] = 360,
+        size: Size = "large",
+    ) -> CallToolResult:
+        """Render 2–8 burst photos in chronological order with T+ delta-time labels.
+
+        Automatically orders frames chronologically by capture time so movement direction
+        and sequence timing can be inspected in a single visual image block.
+        """
+        data, metadata = await ctx.request_context.lifespan_context.burst_strip(
+            photo_ids, direction, tile_height, size
+        )
+        return image_result(metadata, [({"kind": "burst_strip"}, data, "image/jpeg")])
+
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def solunar_summary(
+        ctx: Context,
+        camera_ids: list[str] | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        tags: list[str] | None = None,
+        user_tags: list[str] | None = None,
+        favorites_only: bool = False,
+        has_video: bool | None = None,
+        timezone_name: str = "UTC",
+        latitude: float | None = None,
+        longitude: float | None = None,
+        reinterpret_utc_as_local: bool = False,
+        limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
+    ) -> SolunarSummary:
+        """Analyze indexed photo activity by moon phase, lunar illumination, and solar twilight.
+
+        Supply latitude and longitude (or configure SPYPOINT_DEFAULT_LATITUDE/LONGITUDE)
+        to include solar elevation breakdown (day, civil/nautical/astronomical twilight, night).
+        """
+        timezone(timezone_name)
+        service = ctx.request_context.lifespan_context
+        lat = latitude if latitude is not None else service.client.settings.default_latitude
+        lon = longitude if longitude is not None else service.client.settings.default_longitude
+        window = await service.catalog.window(
+            camera_ids, after, before, tags, limit, favorites_only, has_video, user_tags
+        )
+        result = await asyncio.to_thread(
+            summarize_solunar,
+            window["photos"],
+            timezone_name,
+            window["truncated"],
+            lat,
+            lon,
+            reinterpret_utc_as_local,
+            window.get("camera_names"),
+        )
+        return SolunarSummary.model_validate(
+            {
+                **result,
+                "queried_at": window["queried_at"],
+                "after": window["after"],
+                "before": window["before"],
+            }
+        )
+
+    @server.tool(annotations=READ)
+    @safe_tool
+    async def telemetry_trends(
+        ctx: Context,
+        camera_ids: list[str] | None = None,
+        critical_battery_threshold: Annotated[float, Field(ge=0, lt=100)] = 15.0,
+        refresh_live: bool = True,
+    ) -> FleetTelemetryTrends:
+        """Compute historical battery discharge rates, days to critical, and signal stability.
+
+        Uses telemetry snapshots logged in the local SQLite catalog across camera discoveries.
+        """
+        return FleetTelemetryTrends.model_validate(
+            await ctx.request_context.lifespan_context.telemetry_trends(
+                camera_ids, critical_battery_threshold, refresh_live
+            )
+        )
+
+    @server.tool(annotations=WRITE)
+    @safe_tool
+    async def annotate_photo(
+        photo_id: str,
+        ctx: Context,
+        note: str | None = None,
+        user_tags: list[str] | None = None,
+    ) -> PhotoAnnotation:
+        """Read or save private local field notes and custom user_tags for a photo.
+
+        Omit both note and user_tags to read existing annotations. Annotations are stored
+        only in the local SQLite catalog and never modify upstream SPYPOINT data.
+        """
+        return PhotoAnnotation.model_validate(
+            await ctx.request_context.lifespan_context.annotate_photo(photo_id, note, user_tags)
+        )
+
+    @server.tool(annotations=WRITE)
+    @safe_tool
+    async def check_new_photos(
+        ctx: Context,
+        camera_ids: list[str] | None = None,
+        watermark_key: str = "default",
+        limit: Annotated[int, Field(ge=1, le=100)] = 50,
+        advance_watermark: bool = True,
+    ) -> IncrementalPollResult:
+        """Poll for photos captured since the stored high-water mark for watermark_key.
+
+        Indexes any new photos into the local catalog and advances the watermark timestamp.
+        """
+        return IncrementalPollResult.model_validate(
+            await ctx.request_context.lifespan_context.check_new_photos(
+                camera_ids, watermark_key, limit, advance_watermark
+            )
+        )
+
     @server.tool(annotations=WRITE)
     @safe_tool
     async def export_catalog(
@@ -461,6 +626,7 @@ def create_server(
         after: str | None = None,
         before: str | None = None,
         tags: list[str] | None = None,
+        user_tags: list[str] | None = None,
         favorites_only: bool = False,
         has_video: bool | None = None,
         limit: Annotated[int, Field(ge=1, le=50000)] = 10000,
@@ -472,7 +638,7 @@ def create_server(
         """
         service = ctx.request_context.lifespan_context
         window = await service.catalog.window(
-            camera_ids, after, before, tags, limit, favorites_only, has_video
+            camera_ids, after, before, tags, limit, favorites_only, has_video, user_tags
         )
         return CatalogExport.model_validate(
             await asyncio.to_thread(export, window, service.client.settings.download_dir, format)

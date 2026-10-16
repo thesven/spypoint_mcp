@@ -44,6 +44,8 @@ class Photo(Output):
     available_video_sizes: list[str] = Field(default_factory=list)
     video_duration_seconds: float | None = None
     hd_status: Literal["available", "pending", "unavailable", "error"] = "unavailable"
+    user_note: str | None = None
+    user_tags: list[str] = Field(default_factory=list)
 
 
 class PhotoPage(Output):
@@ -176,6 +178,8 @@ class ActivitySummary(Output):
     by_day: dict[str, int]
     by_local_hour: dict[str, int]
     by_weekday: dict[str, int]
+    by_moon_phase: dict[str, int] = Field(default_factory=dict)
+    by_sun_phase: dict[str, int] = Field(default_factory=dict)
     hourly_timeline: dict[str, int]
     tag_counts: dict[str, int]
     by_camera: list[CameraActivity]
@@ -199,3 +203,79 @@ class CatalogExport(Output):
     note: str
     path: str
     manifest_path: str
+
+
+class Coordinates(Output):
+    latitude: float
+    longitude: float
+
+
+class CameraSolunarActivity(Output):
+    camera_id: str
+    camera_name: str | None = None
+    photos: int
+    by_moon_phase: dict[str, int]
+    by_sun_phase: dict[str, int]
+
+
+class SolunarSummary(Output):
+    scope: Literal["local_catalog"]
+    photo_count: int
+    truncated: bool
+    timezone: str
+    coordinates_used: Coordinates | None = None
+    by_moon_phase: dict[str, int]
+    by_sun_phase: dict[str, int]
+    crepuscular_photos: int | None = None
+    day_photos: int | None = None
+    night_photos: int | None = None
+    full_moon_window_photos: int
+    new_moon_window_photos: int
+    average_moon_illumination: float | None = None
+    by_camera: list[CameraSolunarActivity]
+    note: str
+    queried_at: str
+    after: str | None = None
+    before: str | None = None
+
+
+class CameraTelemetryTrend(Output):
+    camera_id: str
+    camera_name: str | None = None
+    observations: int
+    first_observed_at: str | None = None
+    last_observed_at: str | None = None
+    latest_battery_level: float | None = None
+    battery_drop_per_day: float | None = None
+    estimated_days_to_critical: float | None = None
+    signal_min: float | None = None
+    signal_max: float | None = None
+    signal_average: float | None = None
+    findings: list[str]
+
+
+class FleetTelemetryTrends(Output):
+    cameras: list[CameraTelemetryTrend]
+    critical_battery_threshold: float
+    scope: Literal["local_catalog"]
+    note: str
+
+
+class PhotoAnnotation(Output):
+    photo_id: str
+    note: str
+    user_tags: list[str]
+    updated_at: str | None = None
+    scope: Literal["local_catalog"]
+
+
+class IncrementalPollResult(Output):
+    watermark_key: str
+    previous_watermark: str | None = None
+    new_watermark: str
+    new_photos_count: int
+    photos: list[Photo]
+    camera_ids: list[str]
+    camera_discovery_complete: bool
+    warnings: list[str]
+    note: str
