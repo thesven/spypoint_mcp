@@ -104,6 +104,7 @@ def create_server(
         try:
             yield service
         finally:
+            await service.close()
             await api.close()
 
     server = MCPServer(

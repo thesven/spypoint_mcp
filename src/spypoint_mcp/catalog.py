@@ -37,11 +37,11 @@ PHOTO_FIELDS = {
 
 
 def selection(
-    camera_ids,
-    after,
-    before,
-    tags,
-    favorites_only,
+    camera_ids=None,
+    after=None,
+    before=None,
+    tags=None,
+    favorites_only=False,
     has_video: bool | None = None,
     user_tags: list[str] | None = None,
 ):
@@ -636,6 +636,42 @@ class Catalog:
                 "queried_at": now(),
                 "after": after,
                 "before": before,
+            }
+
+        return await self._run(read)
+
+    async def photo_date_bounds(
+        self,
+        camera_ids: list[str] | None = None,
+        after: str | None = None,
+        before: str | None = None,
+    ) -> dict:
+        """Find the full capture-date span and camera IDs for matching indexed photos."""
+        after = timestamp(after) if after else None
+        before = timestamp(before) if before else None
+        if after and before and after > before:
+            raise SpypointError("after must not be later than before.")
+
+        def read(db):
+            clauses, params = selection(camera_ids, after, before)
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            row = db.execute(
+                "SELECT count(*) as count, min(date) as oldest, max(date) as newest "
+                "FROM photos" + where,
+                params,
+            ).fetchone()
+            cids = [
+                r[0]
+                for r in db.execute(
+                    "SELECT DISTINCT camera_id FROM photos" + where + " ORDER BY camera_id",
+                    params,
+                ).fetchall()
+            ]
+            return {
+                "count": row["count"] if row else 0,
+                "oldest": row["oldest"] if row else None,
+                "newest": row["newest"] if row else None,
+                "camera_ids": cids,
             }
 
         return await self._run(read)

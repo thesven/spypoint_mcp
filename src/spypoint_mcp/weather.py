@@ -256,95 +256,106 @@ class OpenMeteoClient:
         start: date,
         end: date,
     ) -> list[dict]:
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "hourly": ",".join(self.HOURLY_VARIABLES),
-            "timezone": "UTC",
-        }
-        if self.api_key:
-            params["apikey"] = self.api_key
-
-        try:
-            resp = await self._client.get(base_url, params=params)
-        except httpx.RequestError as exc:
-            raise SpypointError(f"Weather request failed: {exc}") from exc
-
-        if resp.status_code != 200:
-            raise SpypointError(f"Weather provider error {resp.status_code}: {resp.text[:200]}")
-
-        data = resp.json()
-        hourly = data.get("hourly", {})
-        times = hourly.get("time", [])
-        if not times:
-            return []
-
-        temps = hourly.get("temperature_2m", [])
-        rel_hum = hourly.get("relative_humidity_2m", [])
-        dew_pts = hourly.get("dew_point_2m", [])
-        app_temps = hourly.get("apparent_temperature", [])
-        pressures = hourly.get("surface_pressure", [])
-        precip = hourly.get("precipitation", [])
-        snow = hourly.get("snowfall", [])
-        w_codes = hourly.get("weather_code", [])
-        clouds = hourly.get("cloud_cover", [])
-        w_speeds = hourly.get("wind_speed_10m", [])
-        w_dirs = hourly.get("wind_direction_10m", [])
-        w_gusts = hourly.get("wind_gusts_10m", [])
-
-        now_iso = datetime.now(UTC).isoformat()
         results: list[dict] = []
-        for i, time_str in enumerate(times):
-            # Formats like "2026-10-10T14:00" -> normalized to "2026-10-10T14:00:00Z"
-            hour_utc = f"{time_str}:00Z" if len(time_str) == 16 else time_str
-            if not hour_utc.endswith("Z"):
-                hour_utc += "Z"
+        curr_start = start
+        while curr_start <= end:
+            curr_end = min(curr_start + timedelta(days=180), end)
+            params = {
+                "latitude": lat,
+                "longitude": lon,
+                "start_date": curr_start.isoformat(),
+                "end_date": curr_end.isoformat(),
+                "hourly": ",".join(self.HOURLY_VARIABLES),
+                "timezone": "UTC",
+            }
+            if self.api_key:
+                params["apikey"] = self.api_key
 
-            w_code = int(w_codes[i]) if i < len(w_codes) and w_codes[i] is not None else 0
-            desc, cat = interpret_wmo_code(w_code)
+            try:
+                resp = await self._client.get(base_url, params=params)
+            except httpx.RequestError as exc:
+                raise SpypointError(f"Weather request failed: {exc}") from exc
 
-            val_temp = float(temps[i]) if i < len(temps) and temps[i] is not None else 0.0
-            val_app = (
-                float(app_temps[i]) if i < len(app_temps) and app_temps[i] is not None else val_temp
-            )
-            val_hum = float(rel_hum[i]) if i < len(rel_hum) and rel_hum[i] is not None else 0.0
-            val_dew = float(dew_pts[i]) if i < len(dew_pts) and dew_pts[i] is not None else val_temp
-            val_press = (
-                float(pressures[i]) if i < len(pressures) and pressures[i] is not None else 1013.25
-            )
-            val_precip = float(precip[i]) if i < len(precip) and precip[i] is not None else 0.0
-            val_snow = float(snow[i]) if i < len(snow) and snow[i] is not None else 0.0
-            val_cloud = float(clouds[i]) if i < len(clouds) and clouds[i] is not None else 0.0
-            val_wspeed = (
-                float(w_speeds[i]) if i < len(w_speeds) and w_speeds[i] is not None else 0.0
-            )
-            val_wdir = float(w_dirs[i]) if i < len(w_dirs) and w_dirs[i] is not None else 0.0
-            val_wgust = (
-                float(w_gusts[i]) if i < len(w_gusts) and w_gusts[i] is not None else val_wspeed
-            )
+            if resp.status_code != 200:
+                raise SpypointError(f"Weather provider error {resp.status_code}: {resp.text[:200]}")
 
-            results.append(
-                {
-                    "grid_lat": lat,
-                    "grid_lon": lon,
-                    "hour_utc": hour_utc,
-                    "temperature_c": val_temp,
-                    "apparent_temperature_c": val_app,
-                    "relative_humidity": val_hum,
-                    "dew_point_c": val_dew,
-                    "pressure_hpa": val_press,
-                    "wind_speed_kmh": val_wspeed,
-                    "wind_direction_deg": val_wdir,
-                    "wind_gusts_kmh": val_wgust,
-                    "precipitation_mm": val_precip,
-                    "snowfall_cm": val_snow,
-                    "cloud_cover_pct": val_cloud,
-                    "weather_code": w_code,
-                    "weather_condition": desc,
-                    "weather_category": cat,
-                    "fetched_at": now_iso,
-                }
-            )
+            data = resp.json()
+            hourly = data.get("hourly", {})
+            times = hourly.get("time", [])
+            if not times:
+                curr_start = curr_end + timedelta(days=1)
+                continue
+
+            temps = hourly.get("temperature_2m", [])
+            rel_hum = hourly.get("relative_humidity_2m", [])
+            dew_pts = hourly.get("dew_point_2m", [])
+            app_temps = hourly.get("apparent_temperature", [])
+            pressures = hourly.get("surface_pressure", [])
+            precip = hourly.get("precipitation", [])
+            snow = hourly.get("snowfall", [])
+            w_codes = hourly.get("weather_code", [])
+            clouds = hourly.get("cloud_cover", [])
+            w_speeds = hourly.get("wind_speed_10m", [])
+            w_dirs = hourly.get("wind_direction_10m", [])
+            w_gusts = hourly.get("wind_gusts_10m", [])
+
+            now_iso = datetime.now(UTC).isoformat()
+            for i, time_str in enumerate(times):
+                # Formats like "2026-10-10T14:00" -> normalized to "2026-10-10T14:00:00Z"
+                hour_utc = f"{time_str}:00Z" if len(time_str) == 16 else time_str
+                if not hour_utc.endswith("Z"):
+                    hour_utc += "Z"
+
+                w_code = int(w_codes[i]) if i < len(w_codes) and w_codes[i] is not None else 0
+                desc, cat = interpret_wmo_code(w_code)
+
+                val_temp = float(temps[i]) if i < len(temps) and temps[i] is not None else 0.0
+                val_app = (
+                    float(app_temps[i])
+                    if i < len(app_temps) and app_temps[i] is not None
+                    else val_temp
+                )
+                val_hum = float(rel_hum[i]) if i < len(rel_hum) and rel_hum[i] is not None else 0.0
+                val_dew = (
+                    float(dew_pts[i]) if i < len(dew_pts) and dew_pts[i] is not None else val_temp
+                )
+                val_press = (
+                    float(pressures[i])
+                    if i < len(pressures) and pressures[i] is not None
+                    else 1013.25
+                )
+                val_precip = float(precip[i]) if i < len(precip) and precip[i] is not None else 0.0
+                val_snow = float(snow[i]) if i < len(snow) and snow[i] is not None else 0.0
+                val_cloud = float(clouds[i]) if i < len(clouds) and clouds[i] is not None else 0.0
+                val_wspeed = (
+                    float(w_speeds[i]) if i < len(w_speeds) and w_speeds[i] is not None else 0.0
+                )
+                val_wdir = float(w_dirs[i]) if i < len(w_dirs) and w_dirs[i] is not None else 0.0
+                val_wgust = (
+                    float(w_gusts[i]) if i < len(w_gusts) and w_gusts[i] is not None else val_wspeed
+                )
+
+                results.append(
+                    {
+                        "grid_lat": lat,
+                        "grid_lon": lon,
+                        "hour_utc": hour_utc,
+                        "temperature_c": val_temp,
+                        "apparent_temperature_c": val_app,
+                        "relative_humidity": val_hum,
+                        "dew_point_c": val_dew,
+                        "pressure_hpa": val_press,
+                        "wind_speed_kmh": val_wspeed,
+                        "wind_direction_deg": val_wdir,
+                        "wind_gusts_kmh": val_wgust,
+                        "precipitation_mm": val_precip,
+                        "snowfall_cm": val_snow,
+                        "cloud_cover_pct": val_cloud,
+                        "weather_code": w_code,
+                        "weather_condition": desc,
+                        "weather_category": cat,
+                        "fetched_at": now_iso,
+                    }
+                )
+            curr_start = curr_end + timedelta(days=1)
         return results

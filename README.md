@@ -10,7 +10,7 @@ A read-only [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) ser
 > This server only reads from your SPYPOINT account. It **never** modifies camera settings, deletes cloud photos, triggers remote captures, or orders paid HD media. Account credentials and upstream signed S3/CloudFront URLs are kept strictly in process memory and are never exposed in tool arguments, tool outputs, or the local SQLite catalog.
 
 > **Compatibility Status (`v0.2.0`)**
-> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**144 tests, >91% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
+> This is an unofficial integration built against the public SPYPOINT web client (`restapi.spypoint.com`) and community adapter conventions. Automated protocol, security, persistence, and media checks pass across Python 3.11–3.14 (**148 tests, >91% branch-inclusive coverage**), and live account testing has verified authentication, owned camera discovery, JPEG retrieval, contact sheets, exports, and restart/resume sync. Shared cameras and live MP4 downloads remain unverified against a live account. See [API Compatibility](API_COMPATIBILITY.md) and [Verification Evidence](VERIFICATION.md) for details.
 
 ---
 
@@ -411,7 +411,7 @@ uv run python scripts/check_dist.py
 uv run --no-project --with ./dist/spypoint_mcp-0.2.0-py3-none-any.whl python scripts/smoke.py
 ```
 
-- **Test Suite & Coverage**: **144 automated tests** pass with **>91% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
+- **Test Suite & Coverage**: **148 automated tests** pass with **>91% branch-inclusive coverage** (enforced minimum `88%`), validated in GitHub Actions Linux CI across Python `3.11`, `3.12`, `3.13`, and `3.14`.
 - **Project Documentation**:
   - [API_COMPATIBILITY.md](API_COMPATIBILITY.md) — Upstream SPYPOINT REST endpoints, payload contracts, and known limitations
   - [VERIFICATION.md](VERIFICATION.md) & [LIVE_VERIFICATION.json](LIVE_VERIFICATION.json) — Offline and live-account verification evidence

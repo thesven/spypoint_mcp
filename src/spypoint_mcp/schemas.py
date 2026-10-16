@@ -331,6 +331,7 @@ class WeatherSyncResult(Output):
     newest_hour: str | None = None
     scope: Literal["local_catalog"]
     note: str
+    truncated: bool = False
 
 
 class WeatherActivitySummary(Output):

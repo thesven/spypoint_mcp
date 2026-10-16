@@ -1,7 +1,7 @@
 """Tests for weather provider, meteorological conversions, caching, and MCP tools."""
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import httpx
@@ -14,6 +14,7 @@ from spypoint_mcp.analysis import (
     categorize_wind_speed,
     summarize_weather_activity,
 )
+from spypoint_mcp.catalog import Catalog
 from spypoint_mcp.client import SpypointClient, photo_summary
 from spypoint_mcp.config import Settings, SpypointError
 from spypoint_mcp.server import create_server
@@ -452,6 +453,7 @@ async def test_mcp_weather_tools_roundtrip(api, fake):
         assert not sync_res.is_error
         assert sync_res.structured_content["hours_fetched"] == 2
         assert sync_res.structured_content["observations_stored"] == 2
+        assert sync_res.structured_content["truncated"] is False
 
         # Test get_photo_weather
         photo_res = await mcp.call_tool("get_photo_weather", {"photo_id": "p1"})
@@ -477,3 +479,100 @@ async def test_mcp_weather_tools_roundtrip(api, fake):
         assert sdata["by_temperature_band"]["mild_45_60"] == 1
         assert sdata["by_wind_direction"]["W"] == 1
         assert sdata["by_pressure_trend"]["rapidly_falling"] == 1
+
+
+async def test_service_weather_client_lifecycle_and_ownership(api):
+    # Injected client should NOT be closed by service.close()
+    injected_client = AsyncMock(spec=OpenMeteoClient)
+    service = PhotoService(api, weather_client=injected_client)
+    assert service.weather_client is injected_client
+    await service.close()
+    injected_client.close.assert_not_called()
+
+    # Internally created client SHOULD be closed by service.close()
+    service_internal = PhotoService(api)
+    internal_client = service_internal.weather_client
+    assert isinstance(internal_client, OpenMeteoClient)
+    internal_mock_close = AsyncMock()
+    internal_client.close = internal_mock_close
+    await service_internal.close()
+    internal_mock_close.assert_awaited_once()
+
+
+async def test_catalog_photo_date_bounds(api):
+    catalog = Catalog(api.settings)
+    # Empty catalog
+    empty = await catalog.photo_date_bounds()
+    assert empty["count"] == 0
+    assert empty["oldest"] is None
+    assert empty["newest"] is None
+    assert empty["camera_ids"] == []
+
+    # Remember multiple photos across cameras
+    await catalog.remember(
+        [
+            photo_summary(photo("p1", "cam-a", date="2026-09-01T10:00:00.000Z")),
+            photo_summary(photo("p2", "cam-b", date="2026-09-15T12:00:00.000Z")),
+            photo_summary(photo("p3", "cam-a", date="2026-09-30T18:00:00.000Z")),
+        ]
+    )
+
+    bounds = await catalog.photo_date_bounds()
+    assert bounds["count"] == 3
+    assert bounds["oldest"] == "2026-09-01T10:00:00.000Z"
+    assert bounds["newest"] == "2026-09-30T18:00:00.000Z"
+    assert bounds["camera_ids"] == ["cam-a", "cam-b"]
+
+    # Filter by camera
+    bounds_cam_a = await catalog.photo_date_bounds(camera_ids=["cam-a"])
+    assert bounds_cam_a["count"] == 2
+    assert bounds_cam_a["camera_ids"] == ["cam-a"]
+    assert bounds_cam_a["oldest"] == "2026-09-01T10:00:00.000Z"
+    assert bounds_cam_a["newest"] == "2026-09-30T18:00:00.000Z"
+
+    # Filter by date window
+    bounds_filtered = await catalog.photo_date_bounds(
+        after="2026-09-10T00:00:00Z", before="2026-09-20T00:00:00Z"
+    )
+    assert bounds_filtered["count"] == 1
+    assert bounds_filtered["oldest"] == "2026-09-15T12:00:00.000Z"
+    assert bounds_filtered["camera_ids"] == ["cam-b"]
+
+    # Invalid range
+    with pytest.raises(SpypointError, match="after must not be later than before"):
+        await catalog.photo_date_bounds(after="2026-10-01T00:00:00Z", before="2026-09-01T00:00:00Z")
+
+
+async def test_open_meteo_client_large_range_chunking():
+    requests_made = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_made.append((request.url.params["start_date"], request.url.params["end_date"]))
+        return httpx.Response(200, json={"hourly": {"time": ["2026-01-01T00:00"]}})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as client:
+        om_client = OpenMeteoClient(client=client)
+        # 200 days range: should produce 2 chunk requests (180 days and 20 days)
+        start = date(2025, 1, 1)
+        end = date(2025, 7, 20)
+        results = await om_client._query_endpoint(om_client.ARCHIVE_URL, 45.0, -78.0, start, end)
+        assert len(requests_made) == 2
+        assert requests_made[0][0] == "2025-01-01"
+        assert requests_made[0][1] == "2025-06-30"  # 180 days
+        assert requests_made[1][0] == "2025-07-01"
+        assert requests_made[1][1] == "2025-07-20"
+        assert len(results) == 2
+
+
+async def test_sync_weather_no_matching_photos(api):
+    service = PhotoService(api)
+    res = await service.sync_weather(
+        camera_ids=["nonexistent"],
+        latitude=45.0,
+        longitude=-78.0,
+    )
+    assert res["hours_fetched"] == 0
+    assert res["observations_stored"] == 0
+    assert res["truncated"] is False
+    assert "No indexed photos found" in res["note"]

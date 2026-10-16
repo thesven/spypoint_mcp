@@ -38,12 +38,18 @@ class PhotoService:
         self.client = client
         self._catalog: Catalog | None = None
         self._weather = weather_client
+        self._owns_weather = weather_client is None
 
     @property
     def weather_client(self) -> OpenMeteoClient:
         if self._weather is None:
             self._weather = OpenMeteoClient(timeout=self.client.settings.timeout)
+            self._owns_weather = True
         return self._weather
+
+    async def close(self) -> None:
+        if self._owns_weather and self._weather is not None:
+            await self._weather.close()
 
     @property
     def catalog(self) -> Catalog:
@@ -321,11 +327,10 @@ class PhotoService:
         grid_lat = round_grid_coordinate(lat)
         grid_lon = round_grid_coordinate(lon)
 
-        window = await self.catalog.window(
-            camera_ids=camera_ids, after=after, before=before, limit=10000
+        bounds = await self.catalog.photo_date_bounds(
+            camera_ids=camera_ids, after=after, before=before
         )
-        photos = window["photos"]
-        if not photos:
+        if bounds["count"] == 0 or not bounds["oldest"] or not bounds["newest"]:
             return {
                 "camera_ids": camera_ids or [],
                 "hours_fetched": 0,
@@ -336,34 +341,20 @@ class PhotoService:
                 "newest_hour": None,
                 "scope": "local_catalog",
                 "note": "No indexed photos found matching the criteria.",
+                "truncated": False,
             }
 
-        dates = [p["date"] for p in photos if p.get("date")]
-        if not dates:
-            return {
-                "camera_ids": camera_ids or [],
-                "hours_fetched": 0,
-                "observations_stored": 0,
-                "grid_latitude": grid_lat,
-                "grid_longitude": grid_lon,
-                "oldest_hour": None,
-                "newest_hour": None,
-                "scope": "local_catalog",
-                "note": "Indexed photos lacked valid capture dates.",
-            }
-
-        min_dt = datetime.fromisoformat(min(dates).replace("Z", "+00:00"))
-        max_dt = datetime.fromisoformat(max(dates).replace("Z", "+00:00"))
+        min_dt = datetime.fromisoformat(bounds["oldest"].replace("Z", "+00:00"))
+        max_dt = datetime.fromisoformat(bounds["newest"].replace("Z", "+00:00"))
         start_d = (min_dt - timedelta(days=1)).date()
         end_d = (max_dt + timedelta(days=1)).date()
 
         fetched = await self.weather_client.fetch_hourly_range(grid_lat, grid_lon, start_d, end_d)
         stored_count = await self.catalog.store_weather_observations(fetched)
         hours = [obs["hour_utc"] for obs in fetched]
-        cids = list({p["camera_id"] for p in photos})
 
         return {
-            "camera_ids": cids,
+            "camera_ids": bounds["camera_ids"],
             "hours_fetched": len(fetched),
             "observations_stored": stored_count,
             "grid_latitude": grid_lat,
@@ -372,6 +363,7 @@ class PhotoService:
             "newest_hour": max(hours) if hours else None,
             "scope": "local_catalog",
             "note": "Weather observations successfully cached in local SQLite catalog.",
+            "truncated": False,
         }
 
     async def contact_sheet(
